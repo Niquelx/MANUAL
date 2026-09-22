@@ -1,0 +1,691 @@
+# SPDX-FileCopyrightText: The Docling Contributors
+# SPDX-License-Identifier: MIT
+
+import base64
+from io import BytesIO
+from pathlib import Path
+
+import pytest
+from docling_core.types.doc import CodeItem, CodeLanguageLabel, PictureItem
+from PIL import Image
+
+from docling.backend.md_backend import MarkdownDocumentBackend
+from docling.datamodel.backend_options import MarkdownBackendOptions
+from docling.datamodel.base_models import ConversionStatus, DocumentStream, InputFormat
+from docling.datamodel.document import (
+    ConversionResult,
+    DoclingDocument,
+    InputDocument,
+)
+from docling.document_converter import DocumentConverter
+from tests.verify_utils import CONFID_PREC, COORD_PREC
+
+from .test_data_gen_flag import GEN_TEST_DATA
+from .verify_utils import verify_docitems, verify_document
+
+pytestmark = pytest.mark.cross_platform
+
+
+def test_convert_valid():
+    fmt = InputFormat.MD
+    cls = MarkdownDocumentBackend
+
+    md_path = Path("tests") / "data" / "md"
+    relevant_paths = sorted((md_path / "sources").rglob("*.md"))
+    assert len(relevant_paths) > 0
+
+    yaml_filter = ["inline_and_formatting", "mixed_without_h1"]
+    json_filter = ["escaped_characters", "line_breaks", "signature_stamp_01"]
+
+    for in_path in relevant_paths:
+        md_gt_path = md_path / "groundtruth" / f"{in_path.name}.md"
+        yaml_gt_path = md_path / "groundtruth" / f"{in_path.name}.yaml"
+        json_gt_path = md_path / "groundtruth" / f"{in_path.name}.json"
+
+        in_doc = InputDocument(
+            path_or_stream=in_path,
+            format=fmt,
+            backend=cls,
+        )
+        backend = cls(
+            in_doc=in_doc,
+            path_or_stream=in_path,
+        )
+        assert backend.is_valid()
+
+        act_doc = backend.convert()
+        act_data = act_doc.export_to_markdown(compact_tables=True)
+
+        if in_path.stem in json_filter:
+            assert verify_document(act_doc, json_gt_path, GEN_TEST_DATA), (
+                "export to json"
+            )
+
+        if GEN_TEST_DATA:
+            with open(md_gt_path, mode="w", encoding="utf-8") as f:
+                f.write(f"{act_data}\n")
+
+            if in_path.stem in yaml_filter:
+                act_doc.save_as_yaml(
+                    yaml_gt_path,
+                    coord_precision=COORD_PREC,
+                    confid_precision=CONFID_PREC,
+                )
+        else:
+            with open(md_gt_path, encoding="utf-8") as f:
+                exp_data = f.read().rstrip()
+            assert act_data == exp_data
+
+            if in_path.stem in yaml_filter:
+                exp_doc = DoclingDocument.load_from_yaml(yaml_gt_path)
+                verify_docitems(doc_true=act_doc, doc_pred=exp_doc, fuzzy=False)
+
+
+def get_converter():
+    converter = DocumentConverter(allowed_formats=[InputFormat.MD])
+
+    return converter
+
+
+def test_convert_leading_dash_sequences():
+    converter = get_converter()
+    markdown = """## Research Article
+
+Here is some content...
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -This is an open access article under the terms of the Creative Commons Attribution License, which permits use, distribution and reproduction in any medium, provided the original work is properly cited.
+
+<!-- image -->
+"""
+
+    with pytest.warns(UserWarning, match="Detected potentially incorrect Markdown"):
+        conv_result: ConversionResult = converter.convert_string(
+            markdown, format=InputFormat.MD
+        )
+
+    pred_md = conv_result.document.export_to_markdown()
+
+    assert conv_result.status == ConversionStatus.SUCCESS
+    assert (
+        "- This is an open access article under the terms of the Creative Commons Attribution License"
+        in pred_md
+    )
+
+
+def test_convert_list_item_codespan_only():
+    """
+    Regression test:
+    A list item that only contains an inline CodeSpan (no RawText) must not leave
+    a pending ListItem payload behind, otherwise later RawText will attach it to a
+    wrong parent and create a very deep tree (RecursionError in iterate/export).
+    """
+    converter = get_converter()
+    markdown = """# Title
+
+*   `raw_ops.Abort`
+*   `raw_ops.Abs`
+"""
+
+    conv_result: ConversionResult = converter.convert_string(
+        markdown, format=InputFormat.MD
+    )
+    assert conv_result.status == ConversionStatus.SUCCESS
+
+    pred_md = conv_result.document.export_to_markdown()
+    assert "- raw\\_ops.Abort" in pred_md
+    assert "- raw\\_ops.Abs" in pred_md
+
+
+def _convert_markdown(
+    markdown: str, options: MarkdownBackendOptions
+) -> DoclingDocument:
+    stream = BytesIO(markdown.encode("utf-8"))
+    in_doc = InputDocument(
+        path_or_stream=stream,
+        format=InputFormat.MD,
+        backend=MarkdownDocumentBackend,
+        filename="test.md",
+        backend_options=options,
+    )
+    backend = MarkdownDocumentBackend(
+        in_doc=in_doc,
+        path_or_stream=stream,
+        options=options,
+    )
+    assert backend.is_valid()
+    return backend.convert()
+
+
+def _png_data_uri(width: int, height: int) -> str:
+    buffer = BytesIO()
+    Image.new("RGB", (width, height), color=(255, 0, 0)).save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode()
+    return f"data:image/png;base64,{encoded}"
+
+
+def test_convert_embedded_base64_image():
+    """Embedded base64 image data must be decoded when fetch_images is enabled."""
+    markdown = f"# Title\n\n![alt]({_png_data_uri(7, 5)})\n"
+
+    doc = _convert_markdown(markdown, MarkdownBackendOptions(fetch_images=True))
+
+    pictures = [
+        item for item, _ in doc.iterate_items() if isinstance(item, PictureItem)
+    ]
+    assert len(pictures) == 1
+    picture = pictures[0]
+    assert picture.image is not None
+    image = picture.get_image(doc)
+    assert image is not None
+    assert image.size == (7, 5)
+
+
+def test_convert_embedded_base64_image_disabled_by_default():
+    """Without fetch_images the picture stays a placeholder (default behavior)."""
+    markdown = f"# Title\n\n![alt]({_png_data_uri(7, 5)})\n"
+
+    doc = _convert_markdown(markdown, MarkdownBackendOptions())
+
+    pictures = [
+        item for item, _ in doc.iterate_items() if isinstance(item, PictureItem)
+    ]
+    assert len(pictures) == 1
+    assert pictures[0].image is None
+    assert pictures[0].get_image(doc) is None
+
+
+def test_convert_embedded_base64_image_enforces_size_limit():
+    """Decoded base64 images larger than the configured cap are rejected."""
+    markdown = f"# Title\n\n![alt]({_png_data_uri(7, 5)})\n"
+
+    with pytest.warns(UserWarning, match="exceeds size limit"):
+        doc = _convert_markdown(
+            markdown,
+            MarkdownBackendOptions(fetch_images=True, max_image_data_base64_bytes=8),
+        )
+
+    pictures = [
+        item for item, _ in doc.iterate_items() if isinstance(item, PictureItem)
+    ]
+    assert len(pictures) == 1
+    assert pictures[0].image is None
+
+
+def test_code_block_language_detection():
+    markdown = (
+        "```python\n"
+        "import sys\n"
+        "print(sys.argv)\n"
+        "```\n\n"
+        "```\n"
+        "SELECT id FROM users;\n"
+        "```\n\n"
+        "```\n"
+        "ambiguous snippet here\n"
+        "```\n"
+    )
+    conv_result = get_converter().convert_string(markdown, format=InputFormat.MD)
+    assert conv_result.status == ConversionStatus.SUCCESS
+
+    code_items = [
+        item for item in conv_result.document.texts if isinstance(item, CodeItem)
+    ]
+    languages = [item.code_language for item in code_items]
+    assert languages == [
+        CodeLanguageLabel.PYTHON,
+        CodeLanguageLabel.SQL,
+        CodeLanguageLabel.UNKNOWN,
+    ]
+
+
+def test_convert_table_has_no_duplicate_cells():
+    """
+    Regression test:
+    A parsed Markdown table must expose each cell exactly once. The backend used
+    to append every cell a second time after passing it to the TableData
+    constructor, so table.data.table_cells contained twice the real cell count
+    (each grid position appeared twice) in export_to_dict/JSON and anything
+    iterating the cells directly.
+    """
+    markdown = """| Region | Q1 | Q2 |
+| --- | --- | --- |
+| North | 10 | 20 |
+| South | 30 | 40 |
+"""
+    conv_result = get_converter().convert_string(markdown, format=InputFormat.MD)
+    assert conv_result.status == ConversionStatus.SUCCESS
+
+    table = conv_result.document.tables[0]
+    table_data = table.data
+    assert len(table_data.table_cells) == table_data.num_rows * table_data.num_cols
+
+    positions = [
+        (cell.start_row_offset_idx, cell.start_col_offset_idx)
+        for cell in table_data.table_cells
+    ]
+    assert len(positions) == len(set(positions))
+
+
+def test_convert_table_without_trailing_pipes():
+    """
+    Regression test:
+    The leading and trailing pipes of a GFM table row are both optional, and the
+    backend's own row detector only requires a leading one. Splitting a row with
+    [1:-1] assumed both were present, so a row written without the trailing pipe
+    lost its last cell and the table came out one column short.
+    """
+    with_trailing = """| Region | Q1 |
+| --- | --- |
+| North | 10 |
+"""
+    without_trailing = """| Region | Q1
+| --- | ---
+| North | 10
+"""
+    expected = ["Region", "Q1", "North", "10"]
+
+    for markdown in (with_trailing, without_trailing):
+        conv_result = get_converter().convert_string(markdown, format=InputFormat.MD)
+        assert conv_result.status == ConversionStatus.SUCCESS
+
+        table_data = conv_result.document.tables[0].data
+        assert table_data.num_cols == 2
+        assert [cell.text for cell in table_data.table_cells] == expected
+
+
+def test_convert_table_without_leading_pipes():
+    """
+    Regression test:
+    The leading pipe is optional in GFM too, but the row detector only entered
+    table mode on a leading pipe, so a table whose header starts with a bare
+    cell was never recognized: every row was emitted as plain text, delimiter
+    row included.
+    """
+    no_leading = """Region | Q1 |
+--- | --- |
+North | 10 |
+"""
+    no_edges = """Region | Q1
+--- | ---
+North | 10
+"""
+    aligned = """Region | Q1
+:--- | ---:
+North | 10
+"""
+    expected = ["Region", "Q1", "North", "10"]
+
+    for markdown in (no_leading, no_edges, aligned):
+        conv_result = get_converter().convert_string(markdown, format=InputFormat.MD)
+        assert conv_result.status == ConversionStatus.SUCCESS
+
+        assert len(conv_result.document.tables) == 1
+        table_data = conv_result.document.tables[0].data
+        assert table_data.num_cols == 2
+        assert [cell.text for cell in table_data.table_cells] == expected
+
+
+def test_convert_table_without_leading_pipes_formatted_header():
+    """
+    Regression test:
+    A header cell in bold or a link is an inline node of its own, so reading the
+    paragraph's RawText nodes alone splits one line into several and moves the
+    delimiter row out of second place. The header then measured one cell, and
+    since rows are trimmed to the header's cell count the data cells went with
+    it -- a 2x2 table silently arrived as 1x2, first column dropped to prose.
+    """
+    bold_first = """**Region** | Q1
+--- | ---
+North | 10
+"""
+    bold_last = """Region | **Q1**
+--- | ---
+North | 10
+"""
+    linked = """[Region](https://example.com) | Q1
+--- | ---
+North | 10
+"""
+    expected = ["Region", "Q1", "North", "10"]
+
+    for markdown in (bold_first, bold_last, linked):
+        conv_result = get_converter().convert_string(markdown, format=InputFormat.MD)
+        assert conv_result.status == ConversionStatus.SUCCESS
+
+        assert len(conv_result.document.tables) == 1
+        table_data = conv_result.document.tables[0].data
+        assert table_data.num_cols == 2
+        assert [cell.text for cell in table_data.table_cells] == expected
+        assert conv_result.document.texts == []
+
+
+def test_convert_pipes_in_prose_stay_text():
+    """
+    A header without a leading pipe is indistinguishable from prose, so the
+    delimiter row on the second line is what makes a paragraph a table. Text
+    that merely contains pipes must not be turned into one.
+    """
+    cases = [
+        "Some sentence with a | pipe in it.\n",
+        "Some sentence with a | pipe in it.\nAnother | line here.\n",
+        # GFM: the delimiter row must match the header row in cell count.
+        "Region | Q1\n--- | --- | ---\nNorth | 10\n",
+    ]
+
+    for markdown in cases:
+        conv_result = get_converter().convert_string(markdown, format=InputFormat.MD)
+        assert conv_result.status == ConversionStatus.SUCCESS
+        assert conv_result.document.tables == []
+
+
+def test_convert_pipeless_table_does_not_leak_into_later_text():
+    """
+    Regression guard:
+    Detecting a header without a leading pipe needs lookahead, which is only
+    available one paragraph at a time, so the decision is taken before
+    descending into the rows. If that state outlived the table, a later
+    paragraph that merely contains a pipe would be absorbed into it.
+    """
+    markdown = """Region | Q1
+--- | ---
+North | 10
+
+Some sentence with a | pipe in it.
+
+Region | Q2
+--- | ---
+South | 20
+"""
+    conv_result = get_converter().convert_string(markdown, format=InputFormat.MD)
+    assert conv_result.status == ConversionStatus.SUCCESS
+
+    tables = conv_result.document.tables
+    assert len(tables) == 2
+    assert [cell.text for cell in tables[0].data.table_cells] == [
+        "Region",
+        "Q1",
+        "North",
+        "10",
+    ]
+    assert [cell.text for cell in tables[1].data.table_cells] == [
+        "Region",
+        "Q2",
+        "South",
+        "20",
+    ]
+    assert "Some sentence with a | pipe in it." in [
+        item.text for item in conv_result.document.texts
+    ]
+
+
+def test_convert_table_rows_match_header_cell_count():
+    """
+    GFM 4.10: "If a row has fewer cells than the header row, empty cells are
+    inserted. If it has greater, the excess is ignored." Without that,
+    table_cells disagreed with num_rows * num_cols and rows came out ragged.
+    """
+    short_row = """| a | b | c |
+| --- | --- | --- |
+| 1 | 2 |
+"""
+    long_row = """| a | b |
+| --- | --- |
+| 1 | 2 | 3 |
+"""
+    for markdown, expected in (
+        (short_row, ["a", "b", "c", "1", "2", ""]),
+        (long_row, ["a", "b", "1", "2"]),
+    ):
+        conv_result = get_converter().convert_string(markdown, format=InputFormat.MD)
+        assert conv_result.status == ConversionStatus.SUCCESS
+
+        table_data = conv_result.document.tables[0].data
+        assert [cell.text for cell in table_data.table_cells] == expected
+        assert len(table_data.table_cells) == table_data.num_rows * table_data.num_cols
+
+
+def test_convert_table_cell_with_escaped_pipe():
+    """
+    Regression test:
+    GFM 4.10 example 200: "Include a pipe in a cell's content by escaping it".
+    Marko resolves ``\\|`` to a Literal node holding a bare ``|``, which the
+    table buffer then took for a cell delimiter: the cell was split in two and
+    the row gained a column the header never had.
+    """
+    leading_pipes = """| a\\|b | c |
+| --- | --- |
+| d\\|e | f |
+"""
+    no_leading_pipes = """a\\|b | c
+--- | ---
+d\\|e | f
+"""
+    inside_strong = """| **a\\|b** | c |
+| --- | --- |
+| d\\|e | f |
+"""
+    expected = ["a|b", "c", "d|e", "f"]
+
+    for markdown in (leading_pipes, no_leading_pipes, inside_strong):
+        conv_result = get_converter().convert_string(markdown, format=InputFormat.MD)
+        assert conv_result.status == ConversionStatus.SUCCESS
+
+        assert len(conv_result.document.tables) == 1
+        table_data = conv_result.document.tables[0].data
+        assert table_data.num_cols == 2
+        assert [cell.text for cell in table_data.table_cells] == expected
+
+
+def test_convert_escaped_pipe_in_prose_stays_text():
+    """
+    Regression test:
+    An escaped pipe reaches the backend as a Literal node holding a bare ``|``,
+    which the row detector read as the leading pipe of a table row. A sentence
+    that merely contained ``\\|`` was split into a text item and a spurious
+    one-cell table, and the pipe itself never reached the document.
+
+    The expectation is pinned to ``\\*``, an escape the backend already handles,
+    so that the assertion covers the pipe's own handling without also freezing
+    how inline runs are split into text items.
+    """
+    for template in ("Some sentence with a \\{c} pipe in it.\n", "a \\{c} b\n"):
+        pipe_result = get_converter().convert_string(
+            template.format(c="|"), format=InputFormat.MD
+        )
+        star_result = get_converter().convert_string(
+            template.format(c="*"), format=InputFormat.MD
+        )
+        assert pipe_result.status == ConversionStatus.SUCCESS
+        assert star_result.status == ConversionStatus.SUCCESS
+
+        assert pipe_result.document.tables == []
+        assert [item.text for item in pipe_result.document.texts] == [
+            item.text.replace("*", "|") for item in star_result.document.texts
+        ]
+
+
+def test_convert_table_escaped_pipe_does_not_add_a_column():
+    """
+    The same defect with whitespace around the escaped pipe. Only the cell
+    count is asserted here: the spaces that surround an inline fragment are
+    dropped by a separate defect (#3991), so the cell text is not yet stable.
+    """
+    markdown = """| a \\| b | c |
+| --- | --- |
+| d | f |
+"""
+    conv_result = get_converter().convert_string(markdown, format=InputFormat.MD)
+    assert conv_result.status == ConversionStatus.SUCCESS
+
+    table_data = conv_result.document.tables[0].data
+    assert table_data.num_cols == 2
+    assert table_data.num_rows == 2
+    assert len(table_data.table_cells) == 4
+
+
+def test_utf8_bom_does_not_hide_the_first_heading(tmp_path):
+    """A leading UTF-8 BOM must not survive into the first line.
+
+    Decoding with plain utf-8 kept it, so "# Title" started with U+FEFF, marko
+    parsed the line as a paragraph instead of a heading, and the BOM reached the
+    exported text. Both the stream and the file path are covered, since each
+    decodes separately.
+    """
+    md_bytes = "\ufeff# Title\n\nSome body text.\n".encode()
+    converter = get_converter()
+
+    stream_doc = converter.convert(
+        DocumentStream(name="bom.md", stream=BytesIO(md_bytes)),
+        raises_on_error=True,
+    ).document
+
+    md_file = tmp_path / "bom.md"
+    md_file.write_bytes(md_bytes)
+    file_doc = converter.convert(md_file, raises_on_error=True).document
+
+    for doc in (stream_doc, file_doc):
+        assert doc.texts[0].label == "title"
+        assert doc.texts[0].text == "Title"
+        assert doc.texts[1].text == "Some body text."
+
+
+def test_convert_line_breaks():
+    """GFM line-break semantics are correctly mapped to DoclingDocument text fields.
+
+    - Soft break (bare newline): two runs joined with a space.
+    - Hard break (two trailing spaces or backslash before newline): two runs joined with '\\n'.
+    - Paragraph break (blank line): two separate TextItems.
+    - Hard break across a formatting boundary: runs that differ in formatting are
+      kept as separate TextItems; the break does not merge them.
+    - Hard and soft breaks inside list items are handled the same as in paragraphs,
+      and do not bleed across sibling items.
+    - Multiple hard breaks and mixed hard+soft breaks in one paragraph are all preserved.
+    """
+    opt = MarkdownBackendOptions()
+
+    # Soft break: joined with a space (GFM §6.7)
+    doc = _convert_markdown("Author 1\nAffiliation 1", opt)
+    assert len(doc.texts) == 1
+    assert doc.texts[0].text == "Author 1 Affiliation 1"
+
+    # Hard break (trailing spaces): joined with '\n'
+    doc = _convert_markdown("Author 1  \nAffiliation 1", opt)
+    assert len(doc.texts) == 1
+    assert doc.texts[0].text == "Author 1\nAffiliation 1"
+
+    # Paragraph break: two separate items
+    doc = _convert_markdown("Author 1\n\nAffiliation 1", opt)
+    assert len(doc.texts) == 2
+    assert doc.texts[0].text == "Author 1"
+    assert doc.texts[1].text == "Affiliation 1"
+
+    # Hard break across a formatting boundary: the break is preserved as a
+    # leading '\n' on the run that follows, since the runs cannot be merged.
+    doc = _convert_markdown("Author **John**  \nUniversity XYZ", opt)
+    assert len(doc.texts) == 3
+    assert doc.texts[0].text == "Author"
+    assert doc.texts[0].formatting is None
+    assert doc.texts[1].text == "John"
+    assert doc.texts[1].formatting is not None
+    assert doc.texts[1].formatting.bold is True
+    assert doc.texts[2].text == "\nUniversity XYZ"
+    assert doc.texts[2].formatting is None
+
+    # Multiple hard breaks in one paragraph
+    doc = _convert_markdown("Line1  \nLine2  \nLine3", opt)
+    assert len(doc.texts) == 1
+    assert doc.texts[0].text == "Line1\nLine2\nLine3"
+
+    # Mixed hard + soft in one paragraph
+    doc = _convert_markdown("Line1  \nLine2\nLine3", opt)
+    assert len(doc.texts) == 1
+    assert doc.texts[0].text == "Line1\nLine2 Line3"
+
+    # Hard break in a list item
+    doc = _convert_markdown("- Item 1  \n  continued", opt)
+    list_items = [t for t in doc.texts if t.label == "list_item"]
+    assert len(list_items) == 1
+    assert list_items[0].text == "Item 1\ncontinued"
+
+    # Multiple hard breaks in one list item
+    doc = _convert_markdown("- first  \nsecond  \nthird", opt)
+    list_items = [t for t in doc.texts if t.label == "list_item"]
+    assert len(list_items) == 1
+    assert list_items[0].text == "first\nsecond\nthird"
+
+    # Hard break does not bleed into the next sibling list item
+    doc = _convert_markdown("- Item 1  \n  continued\n- Item 2", opt)
+    list_items = [t for t in doc.texts if t.label == "list_item"]
+    assert len(list_items) == 2
+    assert list_items[0].text == "Item 1\ncontinued"
+    assert list_items[1].text == "Item 2"
+
+    # Soft break in a list item: joined with a space
+    doc = _convert_markdown("- First\n  Second\n- Item 2", opt)
+    list_items = [t for t in doc.texts if t.label == "list_item"]
+    assert len(list_items) == 2
+    assert list_items[0].text == "First Second"
+    assert list_items[1].text == "Item 2"
+
+
+def test_ordered_list_preserves_start_number():
+    """Ordered lists that start at a number other than 1 must preserve that number.
+
+    A list written as `5. foo\\n6. bar` must export as `5. foo\\n6. bar`,
+    not `1. foo\\n2. bar`.
+    """
+    markdown = "5. foo\n6. bar\n7. baz\n"
+    conv_result = get_converter().convert_string(markdown, format=InputFormat.MD)
+    assert conv_result.status == ConversionStatus.SUCCESS
+
+    items = list(conv_result.document.texts)
+    assert len(items) == 3
+    assert [item.marker for item in items] == ["5.", "6.", "7."]
+
+    exported = conv_result.document.export_to_markdown()
+    assert exported == "5. foo\n6. bar\n7. baz"
+
+
+def test_ordered_list_split_by_prose_preserves_numbers():
+    """A procedure interrupted by prose must keep sequence numbers across the break.
+
+    Steps 1-2, a prose paragraph, then steps 3-4 in the source must come back
+    with exactly those numbers: the second list must NOT restart at 1.
+    """
+    markdown = (
+        "1. Install the package.\n"
+        "2. Set the API key.\n"
+        "\n"
+        "Restart the shell before continuing.\n"
+        "\n"
+        "3. Run the import.\n"
+        "4. Check the output.\n"
+    )
+    conv_result = get_converter().convert_string(markdown, format=InputFormat.MD)
+    assert conv_result.status == ConversionStatus.SUCCESS
+
+    exported = conv_result.document.export_to_markdown()
+    assert "1. Install the package." in exported
+    assert "2. Set the API key." in exported
+    assert "3. Run the import." in exported
+    assert "4. Check the output." in exported
+    # Guard against the "two step 1s" regression explicitly.
+    lines = [
+        ln for ln in exported.splitlines() if ln.startswith(("1.", "2.", "3.", "4."))
+    ]
+    assert lines == [
+        "1. Install the package.",
+        "2. Set the API key.",
+        "3. Run the import.",
+        "4. Check the output.",
+    ]
+
+
+def test_standard_ordered_list_still_starts_at_one():
+    """Ordinary 1-based ordered lists must continue to export as 1-based."""
+    markdown = "1. alpha\n2. beta\n3. gamma\n"
+    conv_result = get_converter().convert_string(markdown, format=InputFormat.MD)
+    assert conv_result.status == ConversionStatus.SUCCESS
+
+    exported = conv_result.document.export_to_markdown()
+    assert exported == "1. alpha\n2. beta\n3. gamma"
