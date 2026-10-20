@@ -104,7 +104,7 @@ void Process()
    if((double)s.time <= GlobalVariableGet(g_gvKey))
       return;
    if(!PassFilters())
-      return; // sinal continua válido e pode ser executado na próxima leitura
+      return; // no modo Radar o sinal segue válido e é reavaliado na próxima leitura
 
    Execute(s);
    GlobalVariableSet(g_gvKey, (double)s.time);
