@@ -78,11 +78,6 @@ input group "=== Breakeven ==="
 input bool   InpUseBreakeven   = true;
 input double InpBETriggerR     = 1.0; // move o stop para a entrada quando o lucro atingir N x o risco
 input int    InpBEOffsetPoints = 0;   // pontos além da entrada (ex.: cobrir comissão)
-
-input group "=== Trailing stop (após o breakeven) ==="
-input bool   InpUseTrailing     = true;
-input double InpTrailR          = 1.0; // distância do stop ao preço, em múltiplos do risco inicial
-input int    InpTrailStepPoints = 10;  // só move o stop se avançar pelo menos isso
 input ulong         InpMagic          = 20261020;
 
 struct Signal
@@ -119,7 +114,6 @@ int OnInit()
    g_gvKey = StringFormat("PAR_%s_%I64u", _Symbol, InpMagic);
    if(!GlobalVariableCheck(g_gvKey))
       GlobalVariableSet(g_gvKey, 0);
-   CleanRiskVars();
 
    if(InpSource == SRC_RADAR_OBJECTS && InpDiagnostic)
       DumpObjects(true);
@@ -129,24 +123,17 @@ int OnInit()
   }
 
 void OnDeinit(const int reason) { EventKillTimer(); }
-void OnTimer()                  { ManageStops(); Process(); }
-void OnTick()                   { ManageStops(); Process(); }
+void OnTimer()                  { ManageBreakeven(); Process(); }
+void OnTick()                   { ManageBreakeven(); Process(); }
 
 //+------------------------------------------------------------------+
-//| Gestão do stop:                                                    |
-//| 1) Breakeven: leva o stop para a entrada quando o lucro alcança    |
-//|    InpBETriggerR vezes o risco inicial.                           |
-//| 2) Trailing: com o stop já na entrada ou em lucro, acompanha o     |
-//|    preço a InpTrailR vezes o risco inicial.                       |
-//| O risco inicial fica salvo por ticket (PAR_R_<ticket>) porque,     |
-//| depois do breakeven, o stop original deixa de existir.             |
+//| Leva o stop para a entrada quando o lucro alcança InpBETriggerR   |
+//| vezes o risco inicial (distância entre entrada e stop original).  |
 //+------------------------------------------------------------------+
-void ManageStops()
+void ManageBreakeven()
   {
-   if(!InpUseBreakeven && !InpUseTrailing)
+   if(!InpUseBreakeven)
       return;
-   double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
-
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong ticket = PositionGetTicket(i);
@@ -159,63 +146,28 @@ void ManageStops()
       double tp   = PositionGetDouble(POSITION_TP);
       if(sl <= 0)
          continue;
-      bool   buy   = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      bool   buy  = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double risk = buy ? open - sl : sl - open;
+      if(risk <= 0)
+         continue; // stop já está na entrada ou em lucro
+
       double price = buy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       double gain  = buy ? price - open : open - price;
-      double risk  = buy ? open - sl : sl - open;
-      string rKey  = StringFormat("PAR_R_%I64u", ticket);
-      double newSL = 0;
-      string what  = "";
+      if(gain < InpBETriggerR * risk)
+         continue;
 
-      if(risk > 0)
-        {
-         if(!GlobalVariableCheck(rKey))
-            GlobalVariableSet(rKey, risk);
-         if(!InpUseBreakeven || gain < InpBETriggerR * risk)
-            continue;
-         newSL = NormalizeDouble(buy ? open + InpBEOffsetPoints * _Point
-                                     : open - InpBEOffsetPoints * _Point, _Digits);
-         if(buy ? (newSL <= sl) : (newSL >= sl))
-            continue;
-         what = "Breakeven";
-        }
-      else
-        {
-         if(!InpUseTrailing)
-            continue;
-         double r0 = 0;
-         if(GlobalVariableCheck(rKey))
-            r0 = GlobalVariableGet(rKey);
-         else if(tp > 0 && InpRR > 0)
-            r0 = MathAbs(tp - open) / InpRR; // reserva: risco deduzido do alvo
-         if(r0 <= 0)
-            continue;
-         newSL = NormalizeDouble(buy ? price - InpTrailR * r0 : price + InpTrailR * r0, _Digits);
-         if(buy ? (newSL < sl + InpTrailStepPoints * _Point) : (newSL > sl - InpTrailStepPoints * _Point))
-            continue;
-         what = "Trailing";
-        }
-
+      double newSL = NormalizeDouble(buy ? open + InpBEOffsetPoints * _Point
+                                         : open - InpBEOffsetPoints * _Point, _Digits);
+      if(buy ? (newSL <= sl) : (newSL >= sl))
+         continue;
+      double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
       if(buy ? (price - newSL < minDist) : (newSL - price < minDist))
          continue;
-      if(trade.PositionModify(ticket, newSL, tp))
-         PrintFormat("[PAR] %s: posição %I64u com stop em %s.", what, ticket, DoubleToString(newSL, _Digits));
-      else
-         PrintFormat("[PAR] %s falhou na posição %I64u (retcode %u).", what, ticket, trade.ResultRetcode());
-     }
-  }
 
-// Remove o risco salvo de posições que já foram encerradas.
-void CleanRiskVars()
-  {
-   for(int i = GlobalVariablesTotal() - 1; i >= 0; i--)
-     {
-      string name = GlobalVariableName(i);
-      if(StringFind(name, "PAR_R_") != 0)
-         continue;
-      ulong ticket = (ulong)StringToInteger(StringSubstr(name, 6));
-      if(!PositionSelectByTicket(ticket))
-         GlobalVariableDel(name);
+      if(trade.PositionModify(ticket, newSL, tp))
+         PrintFormat("[PAR] Breakeven: posição %I64u com stop movido para %s.", ticket, DoubleToString(newSL, _Digits));
+      else
+         PrintFormat("[PAR] Breakeven falhou na posição %I64u (retcode %u).", ticket, trade.ResultRetcode());
      }
   }
 

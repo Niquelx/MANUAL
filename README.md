@@ -8,7 +8,6 @@ EA para MT5 que executa os sinais do indicador **Price Action Radar v1.2** lendo
 - Caixa tracejada na cor `PatternBoxBearColor` (DeepPink) = venda.
 - Lote por risco: 1% do saldo perdido se o stop for atingido (`InpLotMode = LOT_RISK_PERCENT`, `InpRiskPercent = 1`). Se o lote calculado ficar abaixo do mínimo da corretora, o sinal é descartado.
 - Breakeven: quando o lucro chega a 1x o risco, o stop vai para o preço de entrada (`InpUseBreakeven`, `InpBETriggerR = 1`, `InpBEOffsetPoints` para somar pontos além da entrada).
-- Trailing stop: depois do breakeven, o stop acompanha o preço a 1x o risco inicial (`InpUseTrailing`, `InpTrailR = 1`), avançando de 10 em 10 pontos no mínimo (`InpTrailStepPoints`). Com alvo em 2x, o trailing protege até ~1x de lucro; para deixar o lucro correr, use `InpRR = 0` (sem alvo).
 - Stop na extremidade da caixa (mínima na compra, máxima na venda) + `InpSLBufferPoints`; na venda soma o spread, porque o stop dispara no Ask. Alvo = 2x o risco (`InpRR = 2`).
 - Cada caixa é operada uma única vez (controle por variável global do terminal).
 - **Filtro Smart Strength**: só entra a favor da força do par. Compra exige score > `InpSSMinScore`; venda exige score < -`InpSSMinScore`. Se o painel mostrar `[BUY]`/`[SELL]`, o rótulo também precisa concordar (`InpSSUseBracket`). Sem leitura do painel, o EA não opera.
