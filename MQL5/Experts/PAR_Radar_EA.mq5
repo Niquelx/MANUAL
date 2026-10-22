@@ -22,6 +22,14 @@ enum ENUM_LOT_MODE
    LOT_RISK_PERCENT = 1  // % do saldo arriscado no stop
   };
 
+enum ENUM_SS_MODE
+  {
+   SS_OFF             = 0, // Sem filtro de força
+   SS_PANEL           = 1, // Ler o painel Smart Strength do gráfico
+   SS_NATIVE          = 2, // Força calculada no EA (aproximação, backtestável)
+   SS_PANEL_OR_NATIVE = 3  // Painel; se não achar, cálculo próprio
+  };
+
 input group "=== Fonte do sinal ==="
 input ENUM_SIGNAL_SOURCE InpSource        = SRC_RADAR_OBJECTS;
 input ENUM_TIMEFRAMES    InpSignalTF      = PERIOD_M30;
@@ -38,6 +46,16 @@ input group "=== Padrões nativos (SRC_NATIVE) ==="
 input bool   InpNativeEngulfing = true;
 input bool   InpNativePinBar    = true;
 input double InpPinWickRatio    = 2.0; // pavio mínimo = N x corpo
+
+input group "=== Filtro Smart Strength (só opera a favor) ==="
+input ENUM_SS_MODE    InpSSMode         = SS_PANEL;
+input double          InpSSMinScore     = 0.0;   // painel: compra exige score > X, venda exige score < -X
+input bool            InpSSUseBracket   = true;  // exige [BUY]/[SELL] coerente quando o painel mostrar
+input string          InpSSNameContains = "";    // filtro opcional pelo nome dos objetos do painel
+input int             InpSSRowTolerance = 4;     // px para considerar dois textos na mesma linha
+input ENUM_TIMEFRAMES InpSSTF           = PERIOD_M30; // modo nativo
+input int             InpSSNativeBars   = 24;    // modo nativo: barras da variação
+input double          InpSSNativeMin    = 0.0;   // modo nativo: diferença mínima de força (%)
 
 input group "=== Filtros ==="
 input int  InpMaxSpreadPoints  = 30; // 0 = sem filtro
@@ -66,10 +84,19 @@ struct Signal
    string   origin;
   };
 
+struct TextObj
+  {
+   string text;  // em maiúsculas
+   long   x;
+   long   y;
+  };
+
 CTrade   trade;
 string   g_gvKey;
 int      g_lastRectCount = -1;
 datetime g_lastNativeBar = 0;
+datetime g_lastSSLog     = 0;
+string   g_ccy[8] = {"USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"};
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -105,6 +132,8 @@ void Process()
       return;
    if(!PassFilters())
       return; // no modo Radar o sinal segue válido e é reavaliado na próxima leitura
+   if(!StrengthAllows(s))
+      return; // idem: se a força virar a favor enquanto a caixa vale, entra
 
    Execute(s);
    GlobalVariableSet(g_gvKey, (double)s.time);
@@ -248,6 +277,266 @@ bool PassFilters()
       if(dt.hour < InpStartHour && dt.hour >= InpEndHour)
          return(false);
      }
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Filtro Smart Strength: libera só sinal a favor da força do par.   |
+//| Sem leitura válida, bloqueia (falha fechada).                     |
+//+------------------------------------------------------------------+
+bool StrengthAllows(const Signal &s)
+  {
+   if(InpSSMode == SS_OFF)
+      return(true);
+
+   double score   = 0;
+   int    bracket = 0;
+   string how     = "";
+   bool   allowed = false;
+   bool   read    = false;
+
+   if(InpSSMode == SS_PANEL || InpSSMode == SS_PANEL_OR_NATIVE)
+     {
+      read = PanelPairScore(score, bracket, how);
+      if(read)
+        {
+         allowed = (s.dir * score > InpSSMinScore);
+         if(InpSSUseBracket && bracket != 0 && bracket != s.dir)
+            allowed = false;
+        }
+     }
+   if(!read && (InpSSMode == SS_NATIVE || InpSSMode == SS_PANEL_OR_NATIVE))
+     {
+      read = NativePairScore(score);
+      how  = "cálculo próprio";
+      if(read)
+         allowed = (s.dir * score > InpSSNativeMin);
+     }
+
+   if(!allowed && s.time != g_lastSSLog)
+     {
+      g_lastSSLog = s.time;
+      if(read)
+         PrintFormat("[PAR] Sinal %s %s bloqueado pelo Smart Strength: score %+.2f%s (%s).",
+                     (s.dir > 0) ? "COMPRA" : "VENDA", s.origin, score,
+                     (bracket > 0) ? " [BUY]" : (bracket < 0) ? " [SELL]" : "", how);
+      else
+         PrintFormat("[PAR] Sinal %s bloqueado: Smart Strength não encontrado no gráfico.", s.origin);
+     }
+   return(allowed);
+  }
+
+//+------------------------------------------------------------------+
+//| Lê o painel: primeiro a linha "TF: PAR +x.x [BUY]"; se não houver, |
+//| calcula força da base menos força da cotada (ex.: EUR - JPY).     |
+//+------------------------------------------------------------------+
+bool PanelPairScore(double &score, int &bracket, string &how)
+  {
+   string base  = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_BASE);
+   string quote = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_PROFIT);
+   string pair  = base + quote;
+   TextObj t[];
+   int n = CollectTexts(t);
+   bracket = 0;
+
+   for(int i = 0; i < n; i++)
+     {
+      int p = StringFind(t[i].text, pair);
+      if(p < 0 || StringFind(t[i].text, "[") < 0)
+         continue;
+      if(StringFind(t[i].text, "[BUY]") >= 0)
+         bracket = 1;
+      else if(StringFind(t[i].text, "[SELL]") >= 0)
+         bracket = -1;
+      if(ParseNumber(t[i].text, p + StringLen(pair), score))
+        {
+         how = "linha do par";
+         return(true);
+        }
+      if(bracket != 0)
+        {
+         score = bracket;
+         how   = "rótulo do par";
+         return(true);
+        }
+     }
+
+   double vb = 0, vq = 0;
+   if(CurrencyValue(t, n, base, vb) && CurrencyValue(t, n, quote, vq))
+     {
+      score = vb - vq;
+      how   = StringFormat("%s %+.1f / %s %+.1f", base, vb, quote, vq);
+      return(true);
+     }
+   return(false);
+  }
+
+int CollectTexts(TextObj &t[])
+  {
+   ArrayResize(t, 0);
+   int total = ObjectsTotal(0, -1, -1);
+   for(int i = 0; i < total; i++)
+     {
+      string      name = ObjectName(0, i, -1, -1);
+      ENUM_OBJECT type = (ENUM_OBJECT)ObjectGetInteger(0, name, OBJPROP_TYPE);
+      if(type != OBJ_LABEL && type != OBJ_TEXT && type != OBJ_EDIT && type != OBJ_BUTTON)
+         continue;
+      if(InpSSNameContains != "" && StringFind(name, InpSSNameContains) < 0)
+         continue;
+      string text = ObjectGetString(0, name, OBJPROP_TEXT);
+      if(text == "")
+         continue;
+      StringToUpper(text);
+      int k = ArraySize(t);
+      ArrayResize(t, k + 1);
+      t[k].text = text;
+      t[k].x    = (type == OBJ_TEXT) ? -1 : ObjectGetInteger(0, name, OBJPROP_XDISTANCE);
+      t[k].y    = (type == OBJ_TEXT) ? -1 : ObjectGetInteger(0, name, OBJPROP_YDISTANCE);
+     }
+   return(ArraySize(t));
+  }
+
+//+------------------------------------------------------------------+
+//| Valor da moeda: no mesmo texto ("EUR +2.4 **") ou no texto        |
+//| numérico mais próximo na mesma linha do painel.                   |
+//+------------------------------------------------------------------+
+bool CurrencyValue(const TextObj &t[], int n, const string code, double &v)
+  {
+   for(int i = 0; i < n; i++)
+     {
+      int p = FindToken(t[i].text, code);
+      if(p < 0)
+         continue;
+      if(ParseNumber(t[i].text, p + 3, v))
+         return(true);
+      if(t[i].y < 0)
+         continue;
+
+      long bestDx = -1;
+      for(int j = 0; j < n; j++)
+        {
+         double w  = 0;
+         long   dy = t[j].y - t[i].y;
+         if(j == i || t[j].y < 0 || dy > InpSSRowTolerance || -dy > InpSSRowTolerance)
+            continue;
+         if(!ParseNumber(t[j].text, 0, w))
+            continue;
+         long dx = t[j].x - t[i].x;
+         if(dx < 0)
+            dx = -dx;
+         if(bestDx < 0 || dx < bestDx)
+           {
+            bestDx = dx;
+            v      = w;
+           }
+        }
+      if(bestDx >= 0)
+         return(true);
+     }
+   return(false);
+  }
+
+bool IsLetter(ushort c) { return((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')); }
+
+// Posição do código como palavra isolada (EUR em ">EUR", não em "EURJPY").
+int FindToken(const string s, const string code)
+  {
+   int len = StringLen(s);
+   int p   = StringFind(s, code);
+   while(p >= 0)
+     {
+      bool left  = (p == 0) || !IsLetter(StringGetCharacter(s, p - 1));
+      bool right = (p + 3 >= len) || !IsLetter(StringGetCharacter(s, p + 3));
+      if(left && right)
+         return(p);
+      p = StringFind(s, code, p + 1);
+     }
+   return(-1);
+  }
+
+// Primeiro número com sinal opcional a partir de "from"; ignora dígitos colados em letra (M30).
+bool ParseNumber(const string s, int from, double &v)
+  {
+   int n = StringLen(s);
+   for(int i = from; i < n; i++)
+     {
+      ushort c    = StringGetCharacter(s, i);
+      bool   sign = (c == '+' || c == '-' || c == 0x2212);
+      int    st   = sign ? i + 1 : i;
+      if(st >= n)
+         continue;
+      ushort d = StringGetCharacter(s, st);
+      if(d < '0' || d > '9')
+         continue;
+      if(!sign && i > 0 && IsLetter(StringGetCharacter(s, i - 1)))
+         continue;
+      int j = st;
+      while(j < n)
+        {
+         ushort e = StringGetCharacter(s, j);
+         if((e >= '0' && e <= '9') || e == '.' || e == ',')
+            j++;
+         else
+            break;
+        }
+      string num = StringSubstr(s, st, j - st);
+      StringReplace(num, ",", ".");
+      v = StringToDouble(num);
+      if(sign && c != '+')
+         v = -v;
+      return(true);
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+//| Força própria: variação % média de cada moeda contra as outras 7  |
+//| nas últimas InpSSNativeBars barras. Não é a fórmula do Smart       |
+//| Strength; serve para backtest e como reserva.                     |
+//+------------------------------------------------------------------+
+bool NativePairScore(double &score)
+  {
+   string base  = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_BASE);
+   string quote = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_PROFIT);
+   int    p     = StringFind(_Symbol, base + quote);
+   if(p < 0)
+      return(false);
+   string prefix = StringSubstr(_Symbol, 0, p);
+   string suffix = StringSubstr(_Symbol, p + 6);
+
+   double str[8];
+   int    cnt[8];
+   ArrayInitialize(str, 0);
+   ArrayInitialize(cnt, 0);
+   int ib = -1, iq = -1;
+
+   for(int i = 0; i < 8; i++)
+     {
+      if(g_ccy[i] == base)
+         ib = i;
+      if(g_ccy[i] == quote)
+         iq = i;
+      for(int j = 0; j < 8; j++)
+        {
+         if(i == j)
+            continue;
+         string sym = prefix + g_ccy[i] + g_ccy[j] + suffix;
+         if(!SymbolSelect(sym, true))
+            continue;
+         double c0 = iClose(sym, InpSSTF, 1);
+         double cN = iClose(sym, InpSSTF, 1 + InpSSNativeBars);
+         if(c0 <= 0 || cN <= 0)
+            continue;
+         double ch = (c0 - cN) / cN * 100.0;
+         str[i] += ch;
+         str[j] -= ch;
+         cnt[i]++;
+         cnt[j]++;
+        }
+     }
+   if(ib < 0 || iq < 0 || cnt[ib] == 0 || cnt[iq] == 0)
+      return(false);
+   score = str[ib] / cnt[ib] - str[iq] / cnt[iq];
    return(true);
   }
 
