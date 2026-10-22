@@ -73,6 +73,11 @@ input double        InpRR             = 2.0;  // alvo = N x risco (0 = sem TP)
 input int           InpMinSLPoints    = 50;
 input int           InpMaxSLPoints    = 1500; // 0 = sem limite
 input int           InpSlippagePoints = 10;
+
+input group "=== Breakeven ==="
+input bool   InpUseBreakeven   = true;
+input double InpBETriggerR     = 1.0; // move o stop para a entrada quando o lucro atingir N x o risco
+input int    InpBEOffsetPoints = 0;   // pontos além da entrada (ex.: cobrir comissão)
 input ulong         InpMagic          = 20261020;
 
 struct Signal
@@ -118,8 +123,53 @@ int OnInit()
   }
 
 void OnDeinit(const int reason) { EventKillTimer(); }
-void OnTimer()                  { Process(); }
-void OnTick()                   { Process(); }
+void OnTimer()                  { ManageBreakeven(); Process(); }
+void OnTick()                   { ManageBreakeven(); Process(); }
+
+//+------------------------------------------------------------------+
+//| Leva o stop para a entrada quando o lucro alcança InpBETriggerR   |
+//| vezes o risco inicial (distância entre entrada e stop original).  |
+//+------------------------------------------------------------------+
+void ManageBreakeven()
+  {
+   if(!InpUseBreakeven)
+      return;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         (ulong)PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl   = PositionGetDouble(POSITION_SL);
+      double tp   = PositionGetDouble(POSITION_TP);
+      if(sl <= 0)
+         continue;
+      bool   buy  = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double risk = buy ? open - sl : sl - open;
+      if(risk <= 0)
+         continue; // stop já está na entrada ou em lucro
+
+      double price = buy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double gain  = buy ? price - open : open - price;
+      if(gain < InpBETriggerR * risk)
+         continue;
+
+      double newSL = NormalizeDouble(buy ? open + InpBEOffsetPoints * _Point
+                                         : open - InpBEOffsetPoints * _Point, _Digits);
+      if(buy ? (newSL <= sl) : (newSL >= sl))
+         continue;
+      double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+      if(buy ? (price - newSL < minDist) : (newSL - price < minDist))
+         continue;
+
+      if(trade.PositionModify(ticket, newSL, tp))
+         PrintFormat("[PAR] Breakeven: posição %I64u com stop movido para %s.", ticket, DoubleToString(newSL, _Digits));
+      else
+         PrintFormat("[PAR] Breakeven falhou na posição %I64u (retcode %u).", ticket, trade.ResultRetcode());
+     }
+  }
 
 //+------------------------------------------------------------------+
 void Process()
