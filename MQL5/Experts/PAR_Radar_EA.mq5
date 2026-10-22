@@ -65,9 +65,9 @@ input bool InpOnlyOnePosition  = true;
 input bool InpCloseOnOpposite  = true;
 
 input group "=== Gestão ==="
-input ENUM_LOT_MODE InpLotMode        = LOT_FIXED;
+input ENUM_LOT_MODE InpLotMode        = LOT_RISK_PERCENT;
 input double        InpFixedLot       = 0.01;
-input double        InpRiskPercent    = 1.0;
+input double        InpRiskPercent    = 1.0;  // % do saldo perdido se o stop for atingido
 input int           InpSLBufferPoints = 20;   // stop além da caixa
 input double        InpRR             = 2.0;  // alvo = N x risco (0 = sem TP)
 input int           InpMinSLPoints    = 50;
