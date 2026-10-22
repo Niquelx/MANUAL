@@ -561,7 +561,10 @@ void Execute(const Signal &s)
      }
 
    double entry = (s.dir > 0) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double sl    = (s.dir > 0) ? s.lo - InpSLBufferPoints * _Point : s.hi + InpSLBufferPoints * _Point;
+   // Caixa é desenhada no Bid; stop de venda dispara no Ask, por isso soma o spread.
+   double spread = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double sl     = (s.dir > 0) ? s.lo - InpSLBufferPoints * _Point
+                               : s.hi + InpSLBufferPoints * _Point + spread;
    if((s.dir > 0 && sl >= entry) || (s.dir < 0 && sl <= entry))
      {
       PrintFormat("[PAR] Sinal %s descartado: preço já está além do stop.", s.origin);

@@ -6,7 +6,7 @@ EA para MT5 que executa os sinais do indicador **Price Action Radar v1.2** lendo
 
 - Caixa tracejada na cor `PatternBoxBullColor` (34,170,129) = compra.
 - Caixa tracejada na cor `PatternBoxBearColor` (DeepPink) = venda.
-- Stop além da extremidade da caixa (+ `InpSLBufferPoints`), alvo em `InpRR` x risco.
+- Stop na extremidade da caixa (mínima na compra, máxima na venda) + `InpSLBufferPoints`; na venda soma o spread, porque o stop dispara no Ask. Alvo = 2x o risco (`InpRR = 2`).
 - Cada caixa é operada uma única vez (controle por variável global do terminal).
 - **Filtro Smart Strength**: só entra a favor da força do par. Compra exige score > `InpSSMinScore`; venda exige score < -`InpSSMinScore`. Se o painel mostrar `[BUY]`/`[SELL]`, o rótulo também precisa concordar (`InpSSUseBracket`). Sem leitura do painel, o EA não opera.
 
