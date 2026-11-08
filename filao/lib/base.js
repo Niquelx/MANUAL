@@ -18,9 +18,12 @@ const CAMPOS_MONITORADOS = {
 
 export const CONFIG_PADRAO = {
   // Modelo de URL para baixar o shapefile oficial por UF. {UF} é substituído.
-  urlAnm: 'https://app.anm.gov.br/dadosabertos/SIGMINE/PROCESSOS_MINERARIOS/{UF}.zip',
+  // A ANM migrou os dados abertos para dadosabertos.anm.gov.br (2026). Se o nome do arquivo
+  // não bater, o sistema procura o .zip da UF na listagem do diretório.
+  urlAnm: 'https://dadosabertos.anm.gov.br/SIGMINE/PROCESSOS_MINERARIOS/{UF}.zip',
   // Planilha de arrecadação da CFEM (dados abertos ANM). Confira o endereço vigente.
-  urlCfem: 'https://app.anm.gov.br/dadosabertos/ARRECADACAO/CFEM_Arrecadacao.csv',
+  // Diretório da CFEM nos dados abertos. Terminando em "/", o sistema baixa os CSVs de arrecadação listados.
+  urlCfem: 'https://dadosabertos.anm.gov.br/CFEM/',
   urlConsulta: '',
   atualizacaoAutomaticaHoras: 0,
   ufsAutomaticas: [],
@@ -62,6 +65,10 @@ export class Base {
     if (fs.existsSync(this.arqEstado)) {
       const e = JSON.parse(fs.readFileSync(this.arqEstado, 'utf8'));
       this.estado = { ...this.estado, ...e, config: { ...CONFIG_PADRAO, ...(e.config || {}) } };
+      // migração dos endereços antigos da ANM (app.anm.gov.br/dadosabertos)
+      const c = this.estado.config;
+      if (/app\.anm\.gov\.br\/dadosabertos/.test(c.urlAnm)) c.urlAnm = CONFIG_PADRAO.urlAnm;
+      if (/app\.anm\.gov\.br\/dadosabertos/.test(c.urlCfem)) c.urlCfem = CONFIG_PADRAO.urlCfem;
     }
     for (const arq of fs.readdirSync(this.dirProc)) {
       if (!arq.endsWith('.ndjson')) continue;

@@ -37,6 +37,32 @@ Para remover a base de exemplo: aba **Dados** → **Remover** em cada UF.
 | Dados | Download ANM por UF, atualização automática periódica, histórico de importações, backup/restauração |
 | Exportação | CSV (Excel), GeoJSON, KML |
 
+## ★ GeoAnálise (dossiê técnico da área)
+Informe um **processo ANM** (da base local ou buscado direto no SIGMINE online), **importe KML/KMZ/SHP** ou **desenhe** a área. O sistema gera, em segundo plano:
+
+| Bloco | Conteúdo | Fonte |
+|---|---|---|
+| Geologia | Unidades litoestratigráficas 1:250.000 e 1:1.000.000 que cortam a área, com % de área, litotipos e idade | SGB (WFS) |
+| Ocorrências | Ocorrências minerais no raio escolhido, com distância; destaque das que citam a substância-alvo | SGB (ArcGIS) |
+| Restrições | Terras Indígenas, Unidades de Conservação, bloqueio, proteção de fonte, reservas garimpeiras, arrendamentos | FUNAI, MMA, ANM |
+| Superficiários | Imóveis do CAR sobrepostos à área (informe a UF) | SICAR |
+| Direitos minerários | Interferências, área livre, vizinhos por fase e substância, minas ativas (CFEM), áreas que saíram da base | base local |
+| Geofísica | Até 27 mapas processados do levantamento aerogeofísico que cobre a área + anomalias (média + 2σ) | dados do GeoSGB importados por você |
+| Síntese | Pontos de atenção, pontos favoráveis e informações, por regras transparentes | — |
+
+Saídas: **relatório HTML** (abre no navegador; imprimir → PDF), **pacote GIS (.zip)** com grades ESRI ASCII em SIRGAS 2000/UTM, PNG georreferenciados (.pgw/.prj), CSVs, GeoJSON e **KMZ** para o Google Earth. No mapa, cada produto geofísico pode ser sobreposto com opacidade e legenda.
+
+### Produtos geofísicos
+- **Magnetometria (15):** campo anômalo, CMA sombreado, Dx, Dy, 1ª e 2ª derivadas verticais, gradiente horizontal total, amplitude do sinal analítico, tilt, GHT do tilt, theta, continuações para cima de 500/1000/2000 m e residual.
+- **Gamaespectrometria (12):** K, eTh, eU, contagem total, razões eTh/K, eU/K, eU/eTh, ternários RGB e CMY, fator F, K anômalo (Kd) e U anômalo (Ud).
+
+Processamento local: interpolação em grade UTM (média por célula + relaxação harmônica entre linhas de voo, célula padrão = 1/4 do espaçamento entre linhas), remoção de tendência planar, FFT 2D com expansão espelhada, filtro passa-baixa nas derivadas e equalização de histograma nas cores.
+
+### Dados aerogeofísicos
+Baixe os dados de linha (XYZ) ou grades dos projetos no [GeoSGB](https://geosgb.sgb.gov.br/) e importe em **Dados → Levantamentos aerogeofísicos**. Aceita XYZ do Geosoft, CSV/TXT com cabeçalho (X/Y ou LONG/LAT, MAGIGRF, KPERC, ETH, EU, CTCOR), GeoTIFF e ESRI ASCII. Arquivos grandes são gravados em disco por streaming. Use a camada "Projetos aerogeofísicos - SGB" para ver qual projeto cobre sua área.
+
+O botão "Gerar exemplo fictício" cria um levantamento **inventado** para teste.
+
 ## Aba Filtros
 Marque um ou mais filtros (combinação "OU"); o mapa e a lista mostram o resultado, somado aos campos da aba Busca.
 
@@ -77,6 +103,8 @@ As regras ficam em `lib/categorias.js` e podem ser ajustadas. Elas dependem do t
 - Alertas dependem de você atualizar a base (manual ou automática). O sistema compara uma versão da base com a anterior; não lê o Diário Oficial nem o SEI.
 - A "área livre" considera só o que foi importado localmente. Não substitui a consulta oficial de disponibilidade da ANM.
 - Shapefiles devem estar em coordenadas geográficas (SIRGAS 2000/WGS84). Arquivos em UTM são recusados com aviso.
+- **GeoAnálise:** não faz redução ao polo (instável em baixas latitudes; use ASA e tilt). A síntese é baseada em regras e não substitui parecer técnico. A qualidade dos mapas depende do levantamento importado (os dados do SGB já vêm nivelados).
+- A ANM migrou os dados abertos para `dadosabertos.anm.gov.br`. O padrão do sistema já usa o novo endereço; se o nome do arquivo da UF for diferente, o sistema procura o .zip na listagem do diretório. Configurações antigas são migradas sozinhas.
 - Os endereços das camadas foram conferidos por busca na web em nov/2026, mas não puderam ser acessados do ambiente onde o código foi escrito. O teste real acontece no seu computador.
 - Uso pessoal: o servidor escuta só em `127.0.0.1`. Não há login; não exponha na internet.
 

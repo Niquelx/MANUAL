@@ -20,8 +20,17 @@ for (const a of args) {
     if (/^[A-Za-z]{2}$/.test(a)) {
       const url = base.estado.config.urlAnm.replace('{UF}', a.toUpperCase());
       console.log(`Baixando ${url} ...`);
-      const r = await fetch(url);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      let r = await fetch(url);
+      if (!r.ok) {
+        // endereço mudou? procura o .zip da UF na listagem do diretório
+        const dir = url.slice(0, url.lastIndexOf('/') + 1);
+        const html = await (await fetch(dir)).text().catch(() => '');
+        const re = new RegExp(`^(.*[^A-Z])?${a.toUpperCase()}([^A-Z].*)?\\.zip$`, 'i');
+        const alvo = [...html.matchAll(/href="([^"]+)"/gi)].map((m) => decodeURIComponent(m[1])).find((l) => re.test(l.split('/').pop()));
+        if (!alvo) throw new Error(`HTTP ${r.status} em ${url}`);
+        r = await fetch(new URL(alvo, dir).href);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      }
       const feats = await lerArquivoGeo(Buffer.from(await r.arrayBuffer()), `${a}.zip`);
       resumo = base.importarProcessos(feats, { ufPadrao: a.toUpperCase(), origem: `ANM ${a.toUpperCase()}` });
     } else {

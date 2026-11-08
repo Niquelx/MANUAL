@@ -57,14 +57,23 @@ export async function resolver(c) {
       let url = c.url;
       let info;
       try {
+        if (!url) throw new Error('sem endereço configurado');
         info = await buscar(juntar(url, { f: 'json' }), 'json');
         if (info.error) throw new Error(info.error.message || 'erro ArcGIS');
       } catch (e) {
         if (!c.pasta || !c.buscaServico) throw e;
         const pasta = await buscar(juntar(c.pasta, { f: 'json' }), 'json');
         const re = new RegExp(c.buscaServico, 'i');
-        const serv = (pasta.services || []).find((s) => s.type === 'MapServer' && re.test(semAcento(s.name)));
-        if (!serv) throw new Error(`Serviço não encontrado em ${c.pasta}. ${e.message}`);
+        let serv = (pasta.services || []).find((s) => s.type === 'MapServer' && re.test(semAcento(s.name)));
+        // procura também um nível abaixo, nas subpastas do servidor
+        for (const sub of (pasta.folders || []).slice(0, 25)) {
+          if (serv) break;
+          try {
+            const j = await buscar(juntar(`${c.pasta}/${encodeURIComponent(sub)}`, { f: 'json' }), 'json');
+            serv = (j.services || []).find((s) => s.type === 'MapServer' && re.test(semAcento(s.name)));
+          } catch { /* pasta inacessível */ }
+        }
+        if (!serv) throw new Error(`Serviço não encontrado em ${c.pasta} (busca: ${c.buscaServico}). ${e.message}`);
         const raiz = c.pasta.slice(0, c.pasta.indexOf('/rest/services') + '/rest/services'.length);
         url = `${raiz}/${serv.name.split('/').map(encodeURIComponent).join('/')}/MapServer`;
         info = await buscar(juntar(url, { f: 'json' }), 'json');
@@ -130,6 +139,81 @@ export async function legenda(c, r) {
     return String(r.camada || '').split(',').slice(0, 3).map((n) => ({
       rotulo: '', imagem: juntar(r.url, { service: 'WMS', version: '1.1.1', request: 'GetLegendGraphic', format: 'image/png', layer: n }),
     }));
+  }
+  return [];
+}
+
+// ---------------------------------------------------------------------------
+// Consulta de feições (vetores) dentro de um retângulo, para análises de área
+// ---------------------------------------------------------------------------
+function esriParaGeojson(j) {
+  const geom = (g) => {
+    if (!g) return null;
+    if (g.rings) {
+      // anéis externos (horário) e furos (anti-horário) -> MultiPolygon simplificado
+      const polys = [];
+      for (const r of g.rings) {
+        let s = 0;
+        for (let i = 0; i < r.length - 1; i++) s += (r[i + 1][0] - r[i][0]) * (r[i + 1][1] + r[i][1]);
+        if (s > 0 || !polys.length) polys.push([r]); else polys.at(-1).push(r);
+      }
+      return polys.length === 1 ? { type: 'Polygon', coordinates: polys[0] } : { type: 'MultiPolygon', coordinates: polys };
+    }
+    if (g.paths) return { type: 'MultiLineString', coordinates: g.paths };
+    if (g.x !== undefined) return { type: 'Point', coordinates: [g.x, g.y] };
+    return null;
+  };
+  return (j.features || []).map((f) => ({ type: 'Feature', properties: f.attributes || {}, geometry: geom(f.geometry) })).filter((f) => f.geometry);
+}
+
+async function postForm(url, params) {
+  const r = await fetch(url, {
+    method: 'POST', signal: AbortSignal.timeout(TEMPO * 2),
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Filao/1.0 (uso pessoal)' },
+    body: new URLSearchParams(params),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status} em ${new URL(url).host}`);
+  return r.json();
+}
+
+export async function feicoesNoRetangulo(c, r, bbox, { max = 1000, camadaWms } = {}) {
+  const [x0, y0, x1, y1] = bbox;
+  if (c.tipo === 'arcgis') {
+    let ids = r.camadas?.length ? r.camadas : null;
+    if (!ids) {
+      const info = await buscar(juntar(r.url, { f: 'json' }), 'json');
+      ids = (info.layers || []).filter((l) => !l.subLayerIds).map((l) => l.id);
+    }
+    const todas = [];
+    for (const id of ids.slice(0, 12)) {
+      const base = {
+        where: '1=1', geometry: JSON.stringify({ xmin: x0, ymin: y0, xmax: x1, ymax: y1, spatialReference: { wkid: 4326 } }),
+        geometryType: 'esriGeometryEnvelope', inSR: '4326', spatialRel: 'esriSpatialRelIntersects',
+        outFields: '*', returnGeometry: 'true', outSR: '4326', resultRecordCount: String(max),
+      };
+      let feats;
+      try {
+        const j = await postForm(`${r.url}/${id}/query`, { ...base, f: 'geojson' });
+        if (j.error) throw new Error(j.error.message);
+        feats = j.features || [];
+      } catch {
+        const j = await postForm(`${r.url}/${id}/query`, { ...base, f: 'json' });
+        if (j.error) throw new Error(j.error.message || 'erro na consulta ArcGIS');
+        feats = esriParaGeojson(j);
+      }
+      for (const f of feats) { f.properties = { ...(f.properties || {}), _subcamada: id }; todas.push(f); }
+    }
+    return todas;
+  }
+  if (c.tipo === 'wms') {
+    const tipo = camadaWms || String(r.camada || '').split(',')[0];
+    if (!tipo) throw new Error('Camada não resolvida.');
+    const wfs = r.url.replace(/\/wms(\b|$)/i, '/ows');
+    const j = await buscar(juntar(wfs, {
+      service: 'WFS', version: '1.0.0', request: 'GetFeature', typeName: tipo,
+      outputFormat: 'application/json', srsName: 'EPSG:4326', bbox: `${x0},${y0},${x1},${y1}`, maxFeatures: String(max),
+    }), 'json');
+    return (j.features || []).filter((f) => f.geometry);
   }
   return [];
 }

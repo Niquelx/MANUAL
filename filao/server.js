@@ -10,6 +10,8 @@ import { CATEGORIAS, GRUPOS_CATEGORIAS } from './lib/categorias.js';
 import { CATALOGO, GRUPOS_CAMADAS, camadaPorId } from './lib/catalogo.js';
 import { resolver, consultar, legenda } from './lib/geoservicos.js';
 import { lerCfem } from './lib/cfem.js';
+import { gerarDossie, processoOnline, novoId } from './lib/dossie.js';
+import { importarLevantamento, listarLevantamentos, gerarXyzExemplo, PRODUTOS, PALETA_CSS } from './lib/geofisica.js';
 
 const RAIZ = path.dirname(fileURLToPath(import.meta.url));
 const PORTA = Number(process.env.PORTA || process.env.PORT || 3210);
@@ -103,11 +105,68 @@ async function baixarAnm(uf) {
   uf = String(uf).toUpperCase();
   if (!/^[A-Z]{2}$/.test(uf)) throw new Error('UF inválida.');
   const url = base.estado.config.urlAnm.replace('{UF}', uf);
-  const r = await fetch(url, { signal: AbortSignal.timeout(15 * 60 * 1000) });
-  if (!r.ok) throw new Error(`Falha ao baixar ${url}: HTTP ${r.status}`);
+  let r = await fetch(url, { signal: AbortSignal.timeout(15 * 60 * 1000) });
+  if (!r.ok) {
+    // Endereço mudou? Procura o arquivo da UF na listagem do diretório.
+    const alt = await acharNoDiretorio(url.slice(0, url.lastIndexOf('/') + 1), new RegExp(`^(.*[^A-Z])?${uf}([^A-Z].*)?\\.zip$`, 'i'));
+    if (!alt) throw new Error(`Falha ao baixar ${url}: HTTP ${r.status}. Confira o endereço em Dados > Configurações.`);
+    r = await fetch(alt, { signal: AbortSignal.timeout(15 * 60 * 1000) });
+    if (!r.ok) throw new Error(`Falha ao baixar ${alt}: HTTP ${r.status}`);
+  }
   const buf = Buffer.from(await r.arrayBuffer());
   const features = await lerArquivoGeo(buf, `${uf}.zip`);
   return base.importarProcessos(features, { ufPadrao: uf, origem: `ANM ${uf}` });
+}
+
+async function acharNoDiretorio(dirUrl, re) {
+  try {
+    const r = await fetch(dirUrl, { signal: AbortSignal.timeout(30000) });
+    if (!r.ok) return null;
+    const html = await r.text();
+    const links = [...html.matchAll(/href="([^"]+)"/gi)].map((m) => decodeURIComponent(m[1]));
+    const alvo = links.find((l) => re.test(l.split('/').pop()));
+    return alvo ? new URL(alvo, dirUrl).href : null;
+  } catch { return null; }
+}
+
+// Grava o corpo da requisição em arquivo (uploads grandes sem estourar a memória)
+function gravarCorpo(req, destino, limite = 8 * 1024 ** 3) {
+  return new Promise((ok, erro) => {
+    let total = 0;
+    const out = fs.createWriteStream(destino);
+    req.on('data', (c) => {
+      total += c.length;
+      if (total > limite) { req.destroy(); out.destroy(); erro(new Error('Arquivo grande demais.')); }
+    });
+    req.pipe(out);
+    out.on('finish', () => ok(total));
+    out.on('error', erro);
+    req.on('error', erro);
+  });
+}
+
+// ---------- GeoAnálise (tarefas em segundo plano) ----------
+const DIR_DADOS = process.env.DADOS || path.join(RAIZ, 'data');
+const DIR_GEOF = path.join(DIR_DADOS, 'geofisica');
+const DIR_GA = path.join(DIR_DADOS, 'geoanalises');
+const tarefas = new Map();
+
+function iniciarGeoanalise(entrada, opcoes) {
+  const id = novoId();
+  const t = { id, status: 'executando', etapas: [], inicio: Date.now(), titulo: entrada.nome || entrada.processo || 'Área desenhada' };
+  tarefas.set(id, t);
+  gerarDossie({ base, dirDados: DIR_DADOS, camadaEfetiva, camadaResolvida }, { ...entrada, id }, opcoes, (etapas) => { t.etapas = [...etapas]; })
+    .then((r) => { t.status = 'concluida'; t.resumo = { titulo: r.titulo, sintese: r.sintese }; })
+    .catch((e) => { t.status = 'erro'; t.erro = e.message; if (!e.status) console.error(e); fs.rmSync(path.join(DIR_GA, id), { recursive: true, force: true }); });
+  return t;
+}
+
+function listarGeoanalises() {
+  if (!fs.existsSync(DIR_GA)) return [];
+  return fs.readdirSync(DIR_GA).filter((d) => fs.existsSync(path.join(DIR_GA, d, 'resultado.json'))).map((d) => {
+    const r = JSON.parse(fs.readFileSync(path.join(DIR_GA, d, 'resultado.json'), 'utf8'));
+    return { id: d, titulo: r.titulo, criado: r.criado, area_ha: r.area.ha, bbox: r.area.bbox, produtos: r.geofisica?.produtos?.length || 0, atencao: r.sintese.atencao.length, favoravel: r.sintese.favoravel.length };
+  }).sort((a, b) => b.criado.localeCompare(a.criado));
 }
 
 // ---------- Catálogo de camadas oficiais ----------
@@ -158,7 +217,7 @@ function listarCatalogo() {
         url: r.url || e.url, camada: r.camada, camadas: r.camadas,
         status: cache.status || 'nao_verificada', mensagem: cache.mensagem || '', verificado_em: cache.verificado_em || null,
         manual: !!cache.manual, subcamadas: cache.subcamadas || null,
-        precisaResolver: (c.tipo === 'wms' && !r.camada) || (!!e.buscaSubcamada && !(r.camadas || []).length),
+        precisaResolver: (['wms', 'arcgis'].includes(c.tipo) && !(r.url || e.url)) || (c.tipo === 'wms' && !r.camada) || (!!e.buscaSubcamada && !(r.camadas || []).length),
       };
     }),
   };
@@ -167,10 +226,23 @@ function listarCatalogo() {
 // ---------- CFEM ----------
 async function baixarCfem() {
   const url = base.estado.config.urlCfem;
-  const r = await fetch(url, { signal: AbortSignal.timeout(15 * 60 * 1000) });
-  if (!r.ok) throw new Error(`Falha ao baixar ${url}: HTTP ${r.status}`);
-  const { mapa, linhas } = lerCfem(Buffer.from(await r.arrayBuffer()));
-  return { ...base.importarCfem(mapa, url), linhas };
+  let arquivos = [url];
+  if (url.endsWith('/')) {
+    const r = await fetch(url, { signal: AbortSignal.timeout(30000) });
+    if (!r.ok) throw new Error(`Falha ao listar ${url}: HTTP ${r.status}`);
+    const html = await r.text();
+    arquivos = [...new Set([...html.matchAll(/href="([^"]+\.csv)"/gi)].map((m) => new URL(m[1], url).href))]
+      .filter((h) => /arrecada/i.test(decodeURIComponent(h)));
+    if (!arquivos.length) throw new Error(`Nenhum CSV de arrecadação encontrado em ${url}. Informe o endereço do arquivo em Dados > Configurações ou importe o CSV manualmente.`);
+  }
+  let mapa = new Map(), linhas = 0;
+  for (const a of arquivos) {
+    const r = await fetch(a, { signal: AbortSignal.timeout(15 * 60 * 1000) });
+    if (!r.ok) throw new Error(`Falha ao baixar ${a}: HTTP ${r.status}`);
+    const lido = lerCfem(Buffer.from(await r.arrayBuffer()), mapa);
+    mapa = lido.mapa; linhas += lido.linhas;
+  }
+  return { ...base.importarCfem(mapa, arquivos.length > 1 ? `${arquivos.length} arquivos de ${url}` : arquivos[0]), linhas };
 }
 
 // ---------- Rotas da API ----------
@@ -362,6 +434,77 @@ async function api(req, res, url) {
     return enviarJson(res, { ...base.importarCfem(mapa, q.arquivo || 'upload'), linhas });
   }
   if (r === '/api/cfem/baixar' && m === 'POST') return enviarJson(res, await baixarCfem());
+
+
+  // ---------- GeoAnálise ----------
+  if (r === '/api/geoanalise' && m === 'POST') {
+    const { processo, geometria, nome, ...opcoes } = await lerJson(req);
+    if (!processo && !geometria) return enviarJson(res, { erro: 'Informe um processo ou desenhe/importe uma área.' }, 400);
+    return enviarJson(res, iniciarGeoanalise({ processo, geometria, nome }, opcoes));
+  }
+  if (r === '/api/geoanalise' && m === 'GET') return enviarJson(res, listarGeoanalises());
+  if (r === '/api/geoanalise' && m === 'DELETE') {
+    if (!/^ga_[\w-]+$/.test(q.id || '')) return enviarJson(res, { erro: 'id inválido' }, 400);
+    fs.rmSync(path.join(DIR_GA, q.id), { recursive: true, force: true });
+    return enviarJson(res, { ok: true });
+  }
+  if (r === '/api/geoanalise/status' && m === 'GET') {
+    const t = tarefas.get(q.id);
+    if (!t) return enviarJson(res, { erro: 'Tarefa não encontrada (o servidor pode ter reiniciado).' }, 404);
+    return enviarJson(res, t);
+  }
+  if (r === '/api/geoanalise/resultado' && m === 'GET') {
+    if (!/^ga_[\w-]+$/.test(q.id || '')) return enviarJson(res, { erro: 'id inválido' }, 400);
+    const arq = path.join(DIR_GA, q.id, 'resultado.json');
+    if (!fs.existsSync(arq)) return enviarJson(res, { erro: 'Não encontrado.' }, 404);
+    const dados = JSON.parse(fs.readFileSync(arq, 'utf8'));
+    dados.paleta_css = PALETA_CSS;
+    return enviarJson(res, dados);
+  }
+  if (r === '/api/geoanalise/arquivo' && m === 'GET') {
+    const ok = /^ga_[\w-]+$/.test(q.id || '') && /^(relatorio\.html|pacote\.zip|geofisica\.kmz|area\.geojson|contexto\.geojson|geofisica\/produtos\/[a-z0-9_]+\.png)$/.test(q.f || '');
+    if (!ok) return enviarJson(res, { erro: 'Arquivo inválido.' }, 400);
+    const arq = path.join(DIR_GA, q.id, q.f);
+    if (!fs.existsSync(arq)) return enviarJson(res, { erro: 'Não encontrado.' }, 404);
+    const tipos = { '.html': 'text/html; charset=utf-8', '.zip': 'application/zip', '.kmz': 'application/vnd.google-earth.kmz', '.geojson': 'application/geo+json', '.png': 'image/png' };
+    const cab = { 'Content-Type': tipos[path.extname(arq)] };
+    if (q.baixar) cab['Content-Disposition'] = `attachment; filename="${q.id}-${path.basename(arq)}"`;
+    res.writeHead(200, cab);
+    return fs.createReadStream(arq).pipe(res);
+  }
+  if (r === '/api/converter' && m === 'POST') {
+    const feats = await lerArquivoGeo(await lerCorpo(req, 200 * 1024 * 1024), q.arquivo || '');
+    return enviarJson(res, { type: 'FeatureCollection', features: feats.slice(0, 2000) });
+  }
+  if (r === '/api/anm/processo' && m === 'GET') return enviarJson(res, await processoOnline(q.id));
+
+  // ---------- Levantamentos aerogeofísicos ----------
+  if (r === '/api/geofisica' && m === 'GET') return enviarJson(res, { levantamentos: listarLevantamentos(DIR_GEOF), produtos: PRODUTOS, paleta_css: PALETA_CSS });
+  if (r === '/api/geofisica' && m === 'POST') {
+    fs.mkdirSync(path.join(DIR_DADOS, 'tmp'), { recursive: true });
+    const tmp = path.join(DIR_DADOS, 'tmp', crypto.randomUUID());
+    try {
+      await gravarCorpo(req, tmp);
+      const meta = await importarLevantamento(DIR_GEOF, tmp, {
+        nome: q.nome, nomeArquivo: q.arquivo || '', zona: q.zona ? Number(q.zona) : undefined,
+        sul: q.hemisferio !== 'N', canal: q.canal, epsg: q.epsg ? Number(q.epsg) : undefined,
+      });
+      return enviarJson(res, meta);
+    } finally { fs.rmSync(tmp, { force: true }); }
+  }
+  if (r === '/api/geofisica' && m === 'DELETE') {
+    if (!/^lev_[\w-]+$/.test(q.id || '')) return enviarJson(res, { erro: 'id inválido' }, 400);
+    fs.rmSync(path.join(DIR_GEOF, q.id), { recursive: true, force: true });
+    return enviarJson(res, { ok: true });
+  }
+  if (r === '/api/geofisica/exemplo' && m === 'POST') {
+    const { lon = -44.2, lat = -20.4 } = await lerJson(req);
+    fs.mkdirSync(path.join(DIR_DADOS, 'tmp'), { recursive: true });
+    const tmp = path.join(DIR_DADOS, 'tmp', crypto.randomUUID() + '.xyz');
+    fs.writeFileSync(tmp, gerarXyzExemplo([Number(lon), Number(lat)]));
+    try { return enviarJson(res, await importarLevantamento(DIR_GEOF, tmp, { nome: 'Levantamento FICTÍCIO de demonstração', nomeArquivo: 'exemplo.xyz' })); }
+    finally { fs.rmSync(tmp, { force: true }); }
+  }
 
   // Monitoramento de processos
   if (r === '/api/monitorados') {

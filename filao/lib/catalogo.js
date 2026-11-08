@@ -108,6 +108,25 @@ export const CATALOGO = [
     info: 'https://geosgb.sgb.gov.br/', descricao: 'Mapa de Províncias Estruturais do Brasil.',
   },
 
+  {
+    id: 'aerogeo_projetos', nome: 'Projetos aerogeofísicos - SGB', grupos: ['Geociências'], fonte: 'SGB/CPRM',
+    tipo: 'arcgis', url: '', camadas: [], pasta: SGB_ARC, buscaServico: 'aerogeof|aerolevant|projetos?_aero|^aero',
+    info: 'https://www.sgb.gov.br/aerogeofisica',
+    descricao: 'Limites dos projetos de levantamento aerogeofísico. Mostra qual projeto baixar no GeoSGB para usar na GeoAnálise. Endereço localizado automaticamente no geoportal do SGB.',
+  },
+  {
+    id: 'aerogeo_mag', nome: 'Magnetometria regional - SGB', grupos: ['Geociências'], fonte: 'SGB/CPRM',
+    tipo: 'arcgis', url: '', camadas: [], pasta: SGB_ARC, buscaServico: 'magnet|campo_?magn|anomalia_?magn',
+    info: 'https://www.sgb.gov.br/aerogeofisica',
+    descricao: 'Mosaico magnetométrico publicado pelo SGB, se disponível no geoportal (localizado automaticamente).',
+  },
+  {
+    id: 'aerogeo_gama', nome: 'Gamaespectrometria regional - SGB', grupos: ['Geociências'], fonte: 'SGB/CPRM',
+    tipo: 'arcgis', url: '', camadas: [], pasta: SGB_ARC, buscaServico: 'gama|ternari|radiometr',
+    info: 'https://www.sgb.gov.br/aerogeofisica',
+    descricao: 'Mosaico gamaespectrométrico (ternário) publicado pelo SGB, se disponível no geoportal (localizado automaticamente).',
+  },
+
   // ---------- ANM (camadas oficiais online, não exigem importação) ----------
   {
     id: 'anm_processos', nome: 'Processos minerários ativos (online)', grupos: ['ANM (oficial, online)'], fonte: 'ANM / SIGMINE',

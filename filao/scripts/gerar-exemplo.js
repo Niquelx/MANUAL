@@ -74,3 +74,17 @@ base.salvarCamada({
   features: [{ type: 'Feature', properties: { nome: 'Parque Exemplo' }, geometry: { type: 'Polygon', coordinates: [[[-44.3, -20.5], [-44.0, -20.5], [-44.0, -20.25], [-44.3, -20.25], [-44.3, -20.5]]] } }],
 });
 console.log('Base de exemplo criada. Rode: npm start');
+
+// Levantamento aerogeofísico FICTÍCIO sobre a área de exemplo de MG (para a GeoAnálise)
+{
+  const fs = await import('node:fs');
+  const { gerarXyzExemplo, importarLevantamento, listarLevantamentos } = await import('../lib/geofisica.js');
+  const dirGeof = path.join(process.env.DADOS || path.join(RAIZ, 'data'), 'geofisica');
+  for (const l of listarLevantamentos(dirGeof)) if (/FICTÍCIO/.test(l.nome)) fs.rmSync(path.join(dirGeof, l.id), { recursive: true, force: true });
+  const tmp = path.join(dirGeof, '..', 'exemplo-tmp.xyz');
+  fs.mkdirSync(dirGeof, { recursive: true });
+  fs.writeFileSync(tmp, gerarXyzExemplo([-44.2, -20.4], { ladoKm: 60 }));
+  const meta = await importarLevantamento(dirGeof, tmp, { nome: 'Levantamento FICTÍCIO de demonstração (MG)', nomeArquivo: 'exemplo.xyz' });
+  fs.rmSync(tmp, { force: true });
+  console.log('Levantamento fictício:', Object.entries(meta.canais).map(([c, x]) => `${c} ${x.pontos}`).join(', '));
+}

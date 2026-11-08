@@ -15,7 +15,8 @@
     <button data-aba="busca" class="ativa">Busca</button>
     <button data-aba="filtros">Filtros <span id="badge-filtros" class="badge badge-info" hidden></span></button>
     <button data-aba="camadas">Camadas <span id="badge-camadas" class="badge badge-info" hidden></span></button>
-    <button data-aba="analise">Análise de área</button>
+    <button data-aba="geoanalise" class="destaque-aba">★ GeoAnálise</button>
+    <button data-aba="analise">Interferência</button>
     <button data-aba="monitorados">Monitorados</button>
     <button data-aba="alertas">Alertas <span id="badge-alertas" class="badge" hidden></span></button>
     <button data-aba="regioes">Regiões</button>
@@ -82,6 +83,38 @@
       <div id="resultado-info" class="info"></div>
       <ul id="resultados" class="lista"></ul>
       <div id="paginacao" class="paginacao"></div>
+    </section>
+
+    <!-- GEOANÁLISE -->
+    <section data-painel="geoanalise" class="painel">
+      <p class="dica">Dossiê técnico automático de uma área: geologia (SGB), ocorrências minerais, restrições (FUNAI, MMA, ANM), imóveis rurais (SICAR), interferências, minas ativas (CFEM) e até 27 mapas geofísicos processados a partir do levantamento aerogeofísico que cobrir a área.</p>
+      <form id="form-ga" class="form">
+        <div class="linha">
+          <input name="processo" placeholder="Processo ANM (ex.: 830.123/2020)">
+          <button type="button" id="ga-desenhar">Desenhar área</button>
+          <label class="botao-arquivo">KML/KMZ/SHP<input type="file" id="ga-arquivo" accept=".kml,.kmz,.zip,.geojson,.json" hidden></label>
+        </div>
+        <div id="ga-area-info" class="dica">Sem área: informe um processo, desenhe ou importe.</div>
+        <input name="nome" placeholder="Título do relatório (opcional)">
+        <div class="linha">
+          <label>Raio de contexto (km)<input name="raioKm" type="number" value="10" min="1" max="50"></label>
+          <label>Margem geofísica (km)<input name="bufferKm" type="number" value="2" min="0" max="20" step="0.5"></label>
+        </div>
+        <div class="linha">
+          <label>UF (para o SICAR)<select name="uf" id="ga-uf"><option value="">da área/processo</option></select></label>
+          <label>Substância-alvo<input name="substanciaAlvo" placeholder="ex.: OURO"></label>
+        </div>
+        <div class="linha">
+          <label>Levantamento aerogeofísico<select name="levantamento" id="ga-lev"><option value="">Automático</option></select></label>
+          <label>Célula (m)<input name="celula" type="number" min="10" placeholder="automática"></label>
+        </div>
+        <label class="check"><input type="checkbox" name="online" checked> Consultar serviços oficiais online</label>
+        <button class="primario">Gerar GeoAnálise</button>
+      </form>
+      <div id="ga-progresso"></div>
+      <div id="ga-resultado"></div>
+      <h3>Análises anteriores</h3>
+      <ul id="ga-lista" class="lista"></ul>
     </section>
 
     <!-- ANÁLISE DE ÁREA -->
@@ -215,6 +248,20 @@
       <div class="linha acoes"><button id="btn-cfem-baixar" class="primario">Baixar da ANM</button>
         <label class="botao-arquivo">Importar CSV<input type="file" id="arq-cfem" accept=".csv,.txt" hidden></label>
         <label class="check"><input type="checkbox" id="cfem-mesclar"> Somar a planilha anterior (arquivos por período)</label></div>
+      <h3>Levantamentos aerogeofísicos (para a GeoAnálise)</h3>
+      <p class="dica">Baixe os dados de linha (XYZ) ou grades dos projetos aerogeofísicos no <a href="https://geosgb.sgb.gov.br/" target="_blank" rel="noopener">GeoSGB</a> e importe aqui. Formatos: XYZ do Geosoft, CSV/TXT com cabeçalho (X, Y ou LONG/LAT, MAGIGRF, KPERC, ETH, EU, CTCOR), GeoTIFF ou ESRI ASCII (.asc).</p>
+      <form id="form-geof" class="form">
+        <input type="file" name="arquivo" accept=".xyz,.csv,.txt,.dat,.tif,.tiff,.asc" required>
+        <input name="nome" placeholder="Nome do levantamento (ex.: Projeto 1072 - Área X)">
+        <div class="linha">
+          <label>Zona UTM (se só X/Y)<input name="zona" type="number" min="17" max="25" placeholder="ex.: 23"></label>
+          <label>Hemisfério<select name="hemisferio"><option value="S">Sul</option><option value="N">Norte</option></select></label>
+          <label>EPSG (opcional)<input name="epsg" type="number" placeholder="ex.: 31983"></label>
+        </div>
+        <label>Canal (só para grades GeoTIFF/ASC)<select name="canal"><option value="">—</option><option value="mag">Magnetometria (nT)</option><option value="k">Potássio (%)</option><option value="th">eTh (ppm)</option><option value="u">eU (ppm)</option><option value="ct">Contagem total</option></select></label>
+        <div class="linha acoes"><button class="primario">Importar levantamento</button><button type="button" id="btn-geof-exemplo">Gerar exemplo fictício</button></div>
+      </form>
+      <ul id="lista-geof" class="lista"></ul>
       <h3>Configurações</h3>
       <form id="form-config" class="form">
         <label>URL da base ANM ({UF} = sigla)<input name="urlAnm"></label>

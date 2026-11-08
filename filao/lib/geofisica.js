@@ -245,6 +245,23 @@ function interpolar(xs, ys, vs, g) {
       if (sw > 0 && nq >= 3) out[j * nx + i] = sv / sw;
     }
   }
+  // Relaxação harmônica (Gauss-Seidel com sobre-relaxação) nas células sem dado:
+  // superfície suave entre as linhas de voo, mantendo fixas as células com medida.
+  const fixo = new Uint8Array(n);
+  for (let k = 0; k < n; k++) fixo[k] = Number.isNaN(bin[k]) ? 0 : 1;
+  const iter = Math.min(400, 6 * R * R);
+  for (let it = 0; it < iter; it++) {
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const k = j * nx + i;
+      if (fixo[k] || Number.isNaN(out[k])) continue;
+      let s = 0, c = 0;
+      if (i > 0 && !Number.isNaN(out[k - 1])) { s += out[k - 1]; c++; }
+      if (i < nx - 1 && !Number.isNaN(out[k + 1])) { s += out[k + 1]; c++; }
+      if (j > 0 && !Number.isNaN(out[k - nx])) { s += out[k - nx]; c++; }
+      if (j < ny - 1 && !Number.isNaN(out[k + nx])) { s += out[k + nx]; c++; }
+      if (c) out[k] += 1.6 * (s / c - out[k]);
+    }
+  }
   return suavizar(out, nx, ny);
 }
 
@@ -342,19 +359,31 @@ function media(a) {
 function espectro(cheia, nx, ny) {
   const px = pot2(Math.ceil(nx * 1.3)), py = pot2(Math.ceil(ny * 1.3));
   const ox = Math.floor((px - nx) / 2), oy = Math.floor((py - ny) / 2);
-  const m = media(cheia);
+  // remove a tendência planar (mínimos quadrados) para evitar degraus nas bordas espelhadas
+  let S = 0, Si = 0, Sj = 0, Sii = 0, Sjj = 0, Sij = 0, Sv = 0, Siv = 0, Sjv = 0;
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const v = cheia[j * nx + i];
+    S++; Si += i; Sj += j; Sii += i * i; Sjj += j * j; Sij += i * j; Sv += v; Siv += i * v; Sjv += j * v;
+  }
+  const A = [[S, Si, Sj], [Si, Sii, Sij], [Sj, Sij, Sjj]], bv = [Sv, Siv, Sjv];
+  const det = (M) => M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1]) - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0]) + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]);
+  const D = det(A);
+  const coef = [0, 1, 2].map((c) => (D ? det(A.map((linha, r) => linha.map((x, k) => (k === c ? bv[r] : x)))) / D : (c === 0 ? Sv / S : 0)));
+  const plano = (i, j) => coef[0] + coef[1] * i + coef[2] * j;
+  const m = 0;
   const re = new Float64Array(px * py), im = new Float64Array(px * py);
   const refletir = (k, n) => { let r = k; while (r < 0 || r >= n) r = r < 0 ? -r - 1 : 2 * n - r - 1; return r; };
   for (let j = 0; j < py; j++) for (let i = 0; i < px; i++) {
     const gi = i - ox, gj = j - oy;
-    const v = cheia[refletir(gj, ny) * nx + refletir(gi, nx)] - m;
+    const ri = refletir(gi, nx), rj = refletir(gj, ny);
+    const v = cheia[rj * nx + ri] - plano(ri, rj) - m;
     const fx = gi < 0 ? -gi / ox : gi >= nx ? (gi - nx + 1) / (px - nx - ox) : 0;
     const fy = gj < 0 ? -gj / oy : gj >= ny ? (gj - ny + 1) / (py - ny - oy) : 0;
     const d = Math.min(1, Math.max(fx || 0, fy || 0));
     re[j * px + i] = v * 0.5 * (1 + Math.cos(Math.PI * d));
   }
   fft2(re, im, px, py, false);
-  return { re, im, px, py, ox, oy, m };
+  return { re, im, px, py, ox, oy, m, plano };
 }
 
 function filtrar(esp, nx, ny, dx, fn, somarMedia = false) {
@@ -372,7 +401,7 @@ function filtrar(esp, nx, ny, dx, fn, somarMedia = false) {
   }
   fft2(re, im, px, py, true);
   const out = new Float32Array(nx * ny);
-  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) out[j * nx + i] = re[(j + oy) * px + (i + ox)] + (somarMedia ? esp.m : 0);
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) out[j * nx + i] = re[(j + oy) * px + (i + ox)] + (somarMedia ? esp.plano(i, j) : 0);
   return out;
 }
 
@@ -494,10 +523,14 @@ export async function processarArea(dirBase, levId, area, dirSaida, opcoes = {})
     const mascara = mapear(n, (k) => (Number.isNaN(cma[k]) ? 1 : 0));
     const cheia = preencher(cma, nx, ny);
     const esp = espectro(cheia, nx, ny);
-    const dz = filtrar(esp, nx, ny, celula, (k) => k);
-    const dz2 = filtrar(esp, nx, ny, celula, (k) => k * k);
+    // passa-baixa gaussiano para conter o ruído amplificado pelas derivadas
+    const kN = Math.PI / celula;
+    const pb = (k, f) => Math.exp(-((k / (f * kN)) ** 2));
+    const dz = filtrar(esp, nx, ny, celula, (k) => k * pb(k, 0.6));
+    const dz2 = filtrar(esp, nx, ny, celula, (k) => k * k * pb(k, 0.45));
+    const suave = filtrar(esp, nx, ny, celula, (k) => pb(k, 0.6), true);
     const up = (h) => filtrar(esp, nx, ny, celula, (k) => Math.exp(-k * h), true);
-    const [gx, gy] = derivadasXY(Float32Array.from(cheia), nx, ny, celula);
+    const [gx, gy] = derivadasXY(suave, nx, ny, celula);
     const ght = mapear(n, (k) => Math.hypot(gx[k], gy[k]));
     const asa = mapear(n, (k) => Math.hypot(gx[k], gy[k], dz[k]));
     const tilt = mapear(n, (k) => Math.atan2(dz[k], ght[k]));
@@ -778,8 +811,8 @@ export function gerarXyzExemplo(centro = [-44.2, -20.4], { ladoKm = 40, linhaM =
       for (const g of granitos) { const w = Math.exp(-((x - g.x) ** 2 + (y - g.y) ** 2) / (g.r * g.r)); k += 2.2 * w; th += 14 * w; u += 2.5 * w; }
       const wa = Math.exp(-((x - alvo.x) ** 2 + (y - alvo.y) ** 2) / (alvo.r * alvo.r));
       k += 2.5 * wa; u += 1.2 * wa; mag += 250 * wa;
-      k = Math.max(0.05, k + (rnd() - 0.5) * 0.25); th = Math.max(0.5, th + (rnd() - 0.5) * 2); u = Math.max(0.1, u + (rnd() - 0.5) * 0.8);
-      mag += (rnd() - 0.5) * 2;
+      k = Math.max(0.05, k + (rnd() - 0.5) * 0.12); th = Math.max(0.5, th + (rnd() - 0.5) * 1); u = Math.max(0.1, u + (rnd() - 0.5) * 0.4);
+      mag += (rnd() - 0.5) * 0.3;
       const [lon, lat] = deUtm(x, y, zona, sul);
       linhas.push([x.toFixed(1), y.toFixed(1), lon.toFixed(6), lat.toFixed(6), mag.toFixed(2), k.toFixed(3), th.toFixed(2), u.toFixed(2), (k * 2 + th * 0.4 + u).toFixed(2)].join(' '));
     }

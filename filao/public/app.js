@@ -7,6 +7,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n, d = 2) => Number(n || 0).toLocaleString('pt-BR', { maximumFractionDigits: d });
+const fmtV = (n) => { const v = Number(n || 0); return v !== 0 && Math.abs(v) < 0.001 ? v.toExponential(2).replace('.', ',') : fmt(v, 4); };
 const dataBR = (iso) => (iso ? new Date(iso).toLocaleString('pt-BR') : '');
 function toast(msg, ms = 3500) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
@@ -104,7 +105,7 @@ $('#abas').addEventListener('click', (e) => {
 function mostrarAba(nome) {
   $$('#abas button').forEach((x) => x.classList.toggle('ativa', x.dataset.aba === nome));
   $$('.painel').forEach((x) => x.classList.toggle('ativo', x.dataset.painel === nome));
-  ({ monitorados: carregarMonitorados, alertas: carregarAlertas, regioes: carregarRegioes, painel: carregarPainel, dados: carregarDados, camadas: () => { carregarCamadas(); renderCatalogo(); }, filtros: carregarFiltros })[nome]?.();
+  ({ monitorados: carregarMonitorados, alertas: carregarAlertas, regioes: carregarRegioes, painel: carregarPainel, dados: carregarDados, camadas: () => { carregarCamadas(); renderCatalogo(); }, filtros: carregarFiltros, geoanalise: carregarGA })[nome]?.();
 }
 
 // ---------- Busca ----------
@@ -196,6 +197,7 @@ async function abrirProcesso(id) {
         <button id="det-zoom">Ver no mapa</button>
         <button id="det-mon" class="${d.monitorado ? '' : 'primario'}">${d.monitorado ? 'Parar de monitorar' : 'Monitorar'}</button>
         <button id="det-int">Analisar interferências</button>
+        <button id="det-ga" class="primario">★ GeoAnálise</button>
         <button id="det-kml">KML</button>
         <button id="det-geo">GeoJSON</button>
         ${d.link_externo ? `<a class="botao" target="_blank" rel="noopener" href="${esc(d.link_externo)}">Consulta externa ↗</a>` : ''}
@@ -221,6 +223,7 @@ async function abrirProcesso(id) {
     };
     $('#det-int').onclick = () => { mostrarAba('analise'); analisar(d.feature.geometry); };
     $('#det-kml').onclick = () => baixarIds([id], 'kml');
+    $('#det-ga').onclick = () => { $('#form-ga').processo.value = id; gaArea = null; $('#ga-area-info').textContent = `Processo ${id}`; destacar(d.feature); mostrarAba('geoanalise'); };
     $('#det-geo').onclick = () => baixarIds([id], 'geojson');
     if (d.monitorado) $('#det-salvar-nota').onclick = async () => { await post('/api/monitorados', { processo: id, nota: $('#det-nota').value }); toast('Anotação salva.'); };
   } catch (e) { toast(e.message); }
@@ -244,6 +247,12 @@ $('#btn-nova-regiao').onclick = () => iniciarDesenho('regiao', 'Polygon');
 mapa.on('pm:create', async (e) => {
   const geo = e.layer.toGeoJSON().geometry;
   mapa.removeLayer(e.layer);
+  if (modoDesenho === 'geoanalise') {
+    modoDesenho = 'analise';
+    definirAreaGA(geo, 'Área desenhada');
+    mostrarAba('geoanalise');
+    return;
+  }
   if (modoDesenho === 'regiao') {
     const nome = $('#nome-regiao').value.trim() || prompt('Nome da região:') || 'Região';
     await post('/api/regioes', { nome, geometria: geo });
@@ -493,6 +502,7 @@ $('[data-painel="painel"]').addEventListener('click', (e) => {
 const UFS = 'AC AL AM AP BA CE DF ES GO MA MG MS MT PA PB PE PI PR RJ RN RO RR RS SC SE SP TO'.split(' ');
 $('#uf-anm').innerHTML = UFS.map((u) => `<option>${u}</option>`).join('');
 async function carregarDados() {
+  carregarGeof();
   const [r, cfg] = await Promise.all([api('/api/resumo'), api('/api/config')]);
   $('#ufs-carregadas').innerHTML = r.ufs.map((u) => `<div><b>${esc(u.uf)}</b> ${fmt(u.total, 0)} processos <button data-uf-rm="${esc(u.uf)}">Remover</button> <button data-uf-up="${esc(u.uf)}">Atualizar da ANM</button></div>`).join('') || '<div class="sub">Base vazia. Baixe uma UF da ANM ou importe um arquivo.</div>';
   $('#lista-importacoes').innerHTML = r.importacoes.map((i) => `<li><div class="tit"><span>${esc(i.origem)}</span><span class="sub">${dataBR(i.data)}</span></div><div class="sub">${fmt(i.total, 0)} processos · ${fmt(i.novos, 0)} novos · ${fmt(i.alterados, 0)} alterados · ${i.alertas} alertas · UFs: ${esc(i.ufs.join(', '))}</div></li>`).join('');
@@ -873,6 +883,190 @@ $('#arq-cfem').onchange = async (e) => {
     toast(`CFEM: ${fmt(r.linhas, 0)} linhas, ${fmt(r.processos, 0)} processos, ${fmt(r.ativos_na_base, 0)} minas ativas na base.`, 8000);
   } catch (err) { toast(err.message, 8000); }
   e.target.value = ''; carregarDados();
+};
+
+// ---------- GeoAnálise ----------
+let gaArea = null;
+const camadaGA = L.featureGroup().addTo(mapa);
+let overlayGeo = null;
+let gaPolling = null;
+$('#ga-uf').innerHTML += 'AC AL AM AP BA CE DF ES GO MA MG MS MT PA PB PE PI PR RJ RN RO RR RS SC SE SP TO'.split(' ').map((u) => `<option>${u}</option>`).join('');
+
+function definirAreaGA(geometria, rotulo) {
+  gaArea = geometria;
+  $('#form-ga').processo.value = '';
+  camadaGA.clearLayers();
+  L.geoJSON(geometria, { style: { color: '#000', weight: 2.5, fillColor: '#ffd43b', fillOpacity: 0.15 } }).addTo(camadaGA);
+  mapa.fitBounds(camadaGA.getBounds(), { padding: [40, 40] });
+  $('#ga-area-info').textContent = `${rotulo} selecionada.`;
+}
+$('#ga-desenhar').onclick = () => iniciarDesenho('geoanalise', 'Polygon');
+$('#ga-arquivo').onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const fc = await api('/api/converter?arquivo=' + encodeURIComponent(f.name), { method: 'POST', body: f });
+    const pol = fc.features.find((x) => /Polygon/.test(x.geometry.type));
+    if (!pol) toast('O arquivo não tem polígono.'); else definirAreaGA(pol.geometry, `Área de ${f.name}`);
+  } catch (err) { toast(err.message, 6000); }
+  e.target.value = '';
+};
+
+async function carregarGA() {
+  const [lista, geo] = await Promise.all([api('/api/geoanalise'), api('/api/geofisica')]);
+  const sel = $('#ga-lev'), v = sel.value;
+  sel.innerHTML = '<option value="">Automático (o que cobrir a área)</option>' + geo.levantamentos.map((l) => `<option value="${esc(l.id)}">${esc(l.nome)}</option>`).join('');
+  sel.value = v;
+  $('#ga-lista').innerHTML = lista.map((a) => `<li data-ga="${esc(a.id)}"><div class="tit"><span>${esc(a.titulo)}</span><span class="sub">${dataBR(a.criado)}</span></div>
+    <div class="sub">${fmt(a.area_ha)} ha · ${a.produtos} produtos geofísicos · <span style="color:var(--alerta)">${a.atencao} atenção</span> · <span style="color:var(--ok)">${a.favoravel} favoráveis</span></div>
+    <div class="acoes-item"><button data-ga-abrir="${esc(a.id)}">Abrir</button><a class="botao" target="_blank" href="/api/geoanalise/arquivo?id=${esc(a.id)}&f=relatorio.html">Relatório</a><button data-ga-del="${esc(a.id)}">Excluir</button></div></li>`).join('') || '<li class="sub">Nenhuma análise ainda.</li>';
+}
+$('#ga-lista').addEventListener('click', async (e) => {
+  const ab = e.target.closest('[data-ga-abrir]'), del = e.target.closest('[data-ga-del]');
+  if (ab) mostrarResultadoGA(ab.dataset.gaAbrir);
+  if (del && confirm('Excluir esta análise?')) { await api('/api/geoanalise?id=' + del.dataset.gaDel, { method: 'DELETE' }); carregarGA(); }
+});
+
+$('#form-ga').onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const corpo = {
+    nome: f.nome.value.trim() || undefined, raioKm: Number(f.raioKm.value) || 10, bufferKm: Number(f.bufferKm.value) || 0,
+    uf: f.uf.value || undefined, substanciaAlvo: f.substanciaAlvo.value.trim() || undefined,
+    levantamento: f.levantamento.value || undefined, celula: Number(f.celula.value) || undefined, online: f.online.checked,
+  };
+  if (f.processo.value.trim()) corpo.processo = f.processo.value.trim();
+  else if (gaArea) corpo.geometria = gaArea;
+  else return toast('Informe um processo, desenhe ou importe uma área.');
+  if (corpo.processo && !/\d{3}\.?\d{3}\/\d{4}/.test(corpo.processo)) return toast('Use o formato 830.123/2020.');
+  if (corpo.processo) corpo.processo = corpo.processo.replace(/^(\d{3})\.?(\d{3})\/(\d{4})$/, '$1.$2/$3');
+  try {
+    const t = await post('/api/geoanalise', corpo);
+    $('#ga-resultado').innerHTML = '';
+    acompanharGA(t.id);
+  } catch (err) { toast(err.message, 6000); }
+};
+
+function acompanharGA(id) {
+  clearInterval(gaPolling);
+  const pintar = (t) => {
+    $('#ga-progresso').innerHTML = `<div class="etapas">${t.etapas.map((x) => `<div class="${esc(x.status)}"><b>${esc(x.nome)}</b> <span class="sub">${esc(x.detalhe)}</span></div>`).join('')}${t.status === 'executando' ? '<div class="rodando">processando…</div>' : ''}</div>`;
+  };
+  gaPolling = setInterval(async () => {
+    try {
+      const t = await api('/api/geoanalise/status?id=' + id);
+      pintar(t);
+      if (t.status !== 'executando') {
+        clearInterval(gaPolling);
+        if (t.status === 'erro') toast('GeoAnálise: ' + t.erro, 8000);
+        else { toast('GeoAnálise concluída.'); mostrarResultadoGA(id); carregarGA(); }
+      }
+    } catch (err) { clearInterval(gaPolling); toast(err.message); }
+  }, 900);
+}
+
+async function mostrarResultadoGA(id) {
+  const r = await api('/api/geoanalise/resultado?id=' + id);
+  const arq = (f, baixar) => `/api/geoanalise/arquivo?id=${encodeURIComponent(id)}&f=${encodeURIComponent(f)}${baixar ? '&baixar=1' : ''}`;
+  camadaGA.clearLayers();
+  const area = await api(arq('area.geojson'));
+  L.geoJSON(area, { style: { color: '#000', weight: 2.5, fillColor: '#ffd43b', fillOpacity: 0.12 } }).addTo(camadaGA);
+  mapa.fitBounds(camadaGA.getBounds(), { padding: [40, 40] });
+  const geo = r.geofisica && !r.geofisica.erro ? r.geofisica : null;
+  const grupos = geo ? [...new Set(geo.produtos.map((p) => p.grupo))] : [];
+  $('#ga-resultado').innerHTML = `
+    <h3>${esc(r.titulo)}</h3>
+    <div class="numeros">
+      <div><small>Área</small><b>${fmt(r.area.ha)} ha</b></div>
+      <div><small>Área livre (base local)</small><b>${fmt(r.interferencias.perc_livre)}%</b></div>
+      <div><small>Ocorrências SGB (${r.opcoes.raioKm} km)</small><b>${r.ocorrencias?.erro ? '—' : fmt(r.ocorrencias?.total || 0, 0)}</b></div>
+      <div><small>Produtos geofísicos</small><b>${geo ? geo.produtos.length : 0}</b></div>
+    </div>
+    <ul class="sintese">${r.sintese.atencao.map((t) => `<li class="at">⚠ ${esc(t)}</li>`).join('')}${r.sintese.favoravel.map((t) => `<li class="fv">✔ ${esc(t)}</li>`).join('')}${r.sintese.info.map((t) => `<li>• ${esc(t)}</li>`).join('')}</ul>
+    <div class="linha acoes">
+      <a class="botao primario" target="_blank" href="${arq('relatorio.html')}">Abrir relatório (imprimir em PDF)</a>
+      <a class="botao" href="${arq('pacote.zip', true)}">Pacote GIS (.zip)</a>
+      ${geo ? `<a class="botao" href="${arq('geofisica.kmz', true)}">KMZ (Google Earth)</a>` : ''}
+      <button id="ga-contexto">Ver contexto no mapa</button>
+    </div>
+    ${geo ? `<h3>Mapas geofísicos</h3>
+      <label>Opacidade <input type="range" id="ga-opac" min="0.1" max="1" step="0.05" value="0.8"></label>
+      <div id="ga-legenda"></div>
+      <div class="produtos-geo">
+        <label><input type="radio" name="ga-prod" value="" checked> Nenhum</label>
+        ${grupos.map((g) => `<div class="grupo-cab"><span>${esc(g)}</span></div>` + geo.produtos.filter((p) => p.grupo === g).map((p) => `<label title="${esc(p.nota)}"><input type="radio" name="ga-prod" value="${esc(p.id)}"> ${esc(p.nome)}</label>`).join('')).join('')}
+      </div>
+      <h3>Anomalias na área</h3>
+      ${geo.anomalias.map((a) => `<div class="anomalia" data-pt="${a.ponto_maximo.join(',')}"><b>${esc(a.descricao)}</b>: ${fmt(a.perc_area, 1)}% da área acima de média+2σ · máx. ${fmtV(a.maximo)} <span class="sub">(clique para ver)</span></div>`).join('')}`
+    : `<p class="dica">${esc(r.geofisica?.erro || 'Sem geofísica: nenhum levantamento importado cobre a área (aba Dados).')}</p>`}
+    <h3>Etapas</h3>
+    <div class="etapas">${r.etapas.map((x) => `<div class="${esc(x.status)}"><b>${esc(x.nome)}</b> <span class="sub">${esc(x.detalhe)}</span></div>`).join('')}</div>`;
+  $('#ga-progresso').innerHTML = '';
+  $('#ga-contexto').onclick = async () => {
+    const fc = await api(arq('contexto.geojson'));
+    const cores = { litologia: '#b08d57', ocorrencia: '#d9480f', ti: '#a0522d', uc: '#2f9e44', restricao: '#c92a2a', processo: '#1c7ed6' };
+    L.geoJSON(fc, {
+      style: (f) => ({ color: cores[f.properties._tipo] || '#555', weight: 1.2, fillOpacity: f.properties._tipo === 'litologia' ? 0.15 : 0.08, dashArray: f.properties._tipo === 'litologia' ? '' : '4 3' }),
+      pointToLayer: (f, ll) => L.circleMarker(ll, { radius: 5, color: '#fff', weight: 1, fillColor: cores.ocorrencia, fillOpacity: 1 }),
+      onEachFeature: (f, l) => l.bindTooltip(`${esc(f.properties._tipo)}: ${esc(f.properties.nome || f.properties.sigla || f.properties.processo || '')}`),
+    }).addTo(camadaGA);
+    toast('Contexto adicionado ao mapa (litologia, ocorrências, restrições, interferências).');
+  };
+  if (!geo) return;
+  const [w, s, e, n] = geo.limites;
+  $$('[name="ga-prod"]').forEach((el) => el.addEventListener('change', () => {
+    if (overlayGeo) { mapa.removeLayer(overlayGeo); overlayGeo = null; }
+    const pid = el.value;
+    if (!pid) { $('#ga-legenda').innerHTML = ''; return; }
+    overlayGeo = L.imageOverlay(arq(`geofisica/produtos/${pid}.png`), [[s, w], [n, e]], { opacity: Number($('#ga-opac').value), pane: 'oficiais' }).addTo(mapa);
+    const p = geo.produtos.find((x) => x.id === pid);
+    const lg = p.legenda;
+    $('#ga-legenda').innerHTML = lg?.tipo === 'equalizado'
+      ? `<div class="barra-cor" style="background:${r.paleta_css}"></div><div class="esc-cor"><span>${fmtV(lg.p2)}</span><span>${fmtV(lg.p50)}</span><span>${fmtV(lg.p98)} ${esc(p.unidade)}</span></div><div class="dica">${esc(p.nota)}</div>`
+      : `<div class="dica">${lg?.cmy ? 'Ciano = K · Magenta = eTh · Amarelo = eU' : 'Vermelho = K · Verde = eTh · Azul = eU'}. ${esc(p.nota)}</div>`;
+  }));
+  $('#ga-opac').oninput = (ev) => overlayGeo?.setOpacity(Number(ev.target.value));
+  $$('#ga-resultado .anomalia').forEach((el) => el.addEventListener('click', () => {
+    const [lon, lat] = el.dataset.pt.split(',').map(Number);
+    L.circleMarker([lat, lon], { radius: 9, color: '#e03131', weight: 3, fill: false }).addTo(camadaGA);
+    mapa.setView([lat, lon], Math.max(mapa.getZoom(), 13));
+  }));
+}
+
+// ---------- Levantamentos aerogeofísicos ----------
+const camadaLev = L.featureGroup().addTo(mapa);
+async function carregarGeof() {
+  const { levantamentos } = await api('/api/geofisica');
+  $('#lista-geof').innerHTML = levantamentos.map((l) => `<li><div class="tit"><span>${esc(l.nome)}</span><span class="sub">${dataBR(l.criado)}</span></div>
+    <div class="sub">Canais: ${Object.entries(l.canais).map(([c, x]) => `${esc(c)} (${fmt(x.pontos, 0)} pts${x.coluna ? ', ' + esc(x.coluna) : ''})`).join(' · ')}</div>
+    <div class="acoes-item"><button data-lev-ver="${esc(l.id)}" data-bb="${l.bbox.join(',')}">Ver extensão</button><button data-lev-del="${esc(l.id)}">Excluir</button></div></li>`).join('') || '<li class="sub">Nenhum levantamento importado.</li>';
+}
+$('#lista-geof').addEventListener('click', async (e) => {
+  const v = e.target.closest('[data-lev-ver]'), d = e.target.closest('[data-lev-del]');
+  if (v) {
+    const [a, b, c, dd] = v.dataset.bb.split(',').map(Number);
+    camadaLev.clearLayers();
+    L.rectangle([[b, a], [dd, c]], { color: '#9c36b5', weight: 2, dashArray: '6 4', fillOpacity: 0.04 }).bindTooltip('Extensão do levantamento').addTo(camadaLev);
+    mapa.fitBounds([[b, a], [dd, c]]);
+  }
+  if (d && confirm('Excluir este levantamento?')) { await api('/api/geofisica?id=' + d.dataset.levDel, { method: 'DELETE' }); carregarGeof(); }
+});
+$('#form-geof').onsubmit = async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target); const arq = f.get('arquivo');
+  const p = new URLSearchParams({ arquivo: arq.name, nome: f.get('nome') || arq.name, hemisferio: f.get('hemisferio') });
+  for (const k of ['zona', 'epsg', 'canal']) if (f.get(k)) p.set(k, f.get(k));
+  toast(`Importando ${arq.name} (${fmt(arq.size / 1e6, 1)} MB)…`, 120000);
+  try {
+    const m = await api('/api/geofisica?' + p, { method: 'POST', body: arq });
+    toast(`Levantamento importado: ${Object.keys(m.canais).join(', ')}.`, 6000);
+    e.target.reset(); carregarGeof();
+  } catch (err) { toast(err.message, 10000); }
+};
+$('#btn-geof-exemplo').onclick = async () => {
+  const c = mapa.getCenter();
+  toast('Gerando levantamento fictício no centro do mapa…', 30000);
+  try { await post('/api/geofisica/exemplo', { lon: c.lng, lat: c.lat }); toast('Levantamento de exemplo criado (dados FICTÍCIOS).', 6000); carregarGeof(); }
+  catch (err) { toast(err.message); }
 };
 
 // ---------- Início ----------
