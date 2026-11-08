@@ -82,6 +82,71 @@ r = await req('/api/camada?id=../estado'); assert.equal(r.status, 404); passo('b
 // 9. Backup
 r = await req('/api/backup'); assert.ok(r.corpo.monitorados.length >= 1); passo('backup');
 
+
+// 10. Filtros prontos, área livre e registro recente
+r = await req('/api/categorias');
+assert.ok(r.corpo.categorias.length >= 18 && r.corpo.contagens.pesquisa_autorizada === 0 && r.corpo.contagens.pedido_lavra === 1);
+r = await req('/api/busca?categorias=area_livre');
+assert.ok(r.corpo.itens.some((x) => x.processo === '830.003/2022' && x.livre)); passo('filtro Área Livre (processo que saiu da base, sem sobreposição)');
+r = await req('/api/busca?categorias=pedido_lavra,pesquisa_autorizada'); assert.equal(r.corpo.total, 1); passo('combinação OU de filtros');
+
+// 11. Filtro personalizado e grupos minerários
+r = await req('/api/filtros', json({ nome: 'Lavra com evento B', regra: { fase: 'LAVRA', evento: 'EVENTO B' }, parametros: { substancia: 'ouro' } }));
+const idFiltro = r.corpo.id;
+r = await req('/api/busca?categorias=' + idFiltro); assert.equal(r.corpo.total, 1);
+r = await req('/api/filtros', json({ nome: 'ruim', regra: { fase: '(' } })); assert.equal(r.status, 400); passo('filtro personalizado (e rejeita regex inválida)');
+r = await req('/api/grupos', json({ nome: 'Cliente X' }));
+const idGrupo = r.corpo.id;
+await req('/api/grupos', json({ id: idGrupo, processo: '830.001/2020' }, 'PUT'));
+r = await req('/api/busca?grupo=' + idGrupo); assert.equal(r.corpo.total, 1);
+r = await req('/api/processo?id=' + encodeURIComponent('830.001/2020')); assert.equal(r.corpo.grupos[0].nome, 'Cliente X'); passo('grupos minerários');
+
+// 12. CFEM -> minas ativas
+const ano = new Date().getFullYear();
+r = await req('/api/cfem?arquivo=cfem.csv', { method: 'POST', body: `Ano;Mês;Processo;AnoDoProcesso;Substância;UF;Município;ValorRecolhido\n${ano};1;830001;2020;OURO;MG;CIDADE;1.234,56\n2001;1;830002;2021;FERRO;MG;CIDADE;10,00` });
+assert.equal(r.corpo.processos, 2); assert.equal(r.corpo.ativos_na_base, 1);
+r = await req('/api/busca?categorias=minas_cfem'); assert.equal(r.corpo.itens[0].processo, '830.001/2020');
+r = await req('/api/processo?id=' + encodeURIComponent('830.001/2020')); assert.equal(r.corpo.cfem.valor, 1234.56); passo('CFEM e minas ativas');
+
+// 13. Catálogo: resolução automática contra servidores WMS e ArcGIS simulados
+const http = await import('node:http');
+const mock = http.createServer((q, s) => {
+  const u = new URL(q.url, 'http://x');
+  if (u.pathname === '/wms' && /GetCapabilities/i.test(u.searchParams.get('request'))) {
+    s.setHeader('Content-Type', 'text/xml');
+    return s.end(`<WMS_Capabilities><Capability><Layer><Title>raiz</Title><Layer queryable="1"><Name>geosgb:litoestratigrafia_1000000_v2</Name><Title>Geologia 1M</Title></Layer><Layer><Name>geosgb:afloramentos</Name><Title>Afloramentos</Title></Layer></Layer></Capability></WMS_Capabilities>`);
+  }
+  if (u.pathname === '/wms' && /GetFeatureInfo/i.test(u.searchParams.get('request'))) {
+    s.setHeader('Content-Type', 'application/json');
+    return s.end(JSON.stringify({ features: [{ id: 'lito.1', properties: { SIGLA: 'PP1', NOME: 'Unidade teste' } }] }));
+  }
+  if (u.pathname === '/arcgis/MapServer') { s.setHeader('Content-Type', 'application/json'); return s.end(JSON.stringify({ layers: [{ id: 0, name: 'Bahia - 1:1.000.000' }, { id: 1, name: 'Goiás - 1:500.000 [2008]' }, { id: 2, name: 'Pará - 1:350.000' }] })); }
+  if (u.pathname === '/arcgis/MapServer/identify') { s.setHeader('Content-Type', 'application/json'); return s.end(JSON.stringify({ results: [{ layerName: 'Goiás - 1:500.000 [2008]', attributes: { SIGLA: 'X' } }] })); }
+  s.statusCode = 404; s.end('{}');
+});
+await new Promise((ok) => mock.listen(0, '127.0.0.1', ok));
+const M = `http://127.0.0.1:${mock.address().port}`;
+r = await req('/api/catalogo'); assert.ok(r.corpo.camadas.length >= 20);
+r = await req('/api/catalogo', json({ id: 'geologia_1m', url: M + '/wms', camada: 'geosgb:nao_existe' }, 'PUT'));
+assert.equal(r.corpo.status, 'nao_encontrada');
+r = await req('/api/catalogo', json({ id: 'geologia_1m', url: M + '/wms', camada: 'geosgb:litoestratigrafia_1000000_v2' }, 'PUT'));
+assert.equal(r.corpo.status, 'ok');
+r = await req('/api/catalogo/consultar', json({ ids: ['geologia_1m'], lat: -20, lng: -44, bbox: '-45,-21,-43,-19', largura: 800, altura: 600, x: 400, y: 300 }));
+assert.equal(r.corpo[0].itens[0].atributos.NOME, 'Unidade teste'); passo('WMS: verificação, nome manual e consulta de atributos');
+r = await req('/api/catalogo', json({ id: 'geologia_500k', url: M + '/arcgis/MapServer' }, 'PUT'));
+assert.equal(r.corpo.status, 'ok'); assert.deepEqual(r.corpo.camadas, [1]);
+r = await req('/api/catalogo', json({ id: 'geologia_350k', url: M + '/arcgis/MapServer' }, 'PUT'));
+assert.deepEqual(r.corpo.camadas, [2]);
+r = await req('/api/catalogo/consultar', json({ ids: ['geologia_500k'], lat: -15, lng: -49, bbox: '-50,-16,-48,-14', largura: 800, altura: 600, x: 400, y: 300 }));
+assert.equal(r.corpo[0].itens[0].atributos.SIGLA, 'X'); passo('ArcGIS: seleção de subcamadas por escala e identify');
+// Resolução automática (sem nome manual): restaura e aponta só a URL
+const { resolver } = await import('../lib/geoservicos.js');
+const auto = await resolver({ tipo: 'wms', url: M + '/wms', camada: 'geosgb:litoestratigrafia_1m', busca: 'litoestratigrafia_?1(m|000000)' });
+assert.equal(auto.status, 'ok'); assert.equal(auto.camada, 'geosgb:litoestratigrafia_1000000_v2'); passo('auto-resolução de nome de camada WMS');
+const fora = await resolver({ tipo: 'wms', url: 'http://127.0.0.1:1/wms', camada: 'x' });
+assert.equal(fora.status, 'erro'); passo('serviço fora do ar é reportado como erro');
+mock.close();
+
 servidor.close();
 fs.rmSync(dir, { recursive: true, force: true });
 console.log(`\n${ok} verificações passaram.`);

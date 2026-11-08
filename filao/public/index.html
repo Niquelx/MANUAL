@@ -13,11 +13,12 @@
   <div class="marca"><span class="logo">◆</span> Filão</div>
   <nav class="abas" id="abas">
     <button data-aba="busca" class="ativa">Busca</button>
+    <button data-aba="filtros">Filtros <span id="badge-filtros" class="badge badge-info" hidden></span></button>
+    <button data-aba="camadas">Camadas <span id="badge-camadas" class="badge badge-info" hidden></span></button>
     <button data-aba="analise">Análise de área</button>
     <button data-aba="monitorados">Monitorados</button>
     <button data-aba="alertas">Alertas <span id="badge-alertas" class="badge" hidden></span></button>
     <button data-aba="regioes">Regiões</button>
-    <button data-aba="camadas">Camadas</button>
     <button data-aba="painel">Painel</button>
     <button data-aba="dados">Dados</button>
   </nav>
@@ -128,25 +129,57 @@
       <ul id="lista-regioes" class="lista"></ul>
     </section>
 
+    <!-- FILTROS -->
+    <section data-painel="filtros" class="painel">
+      <p class="dica">Marque um ou mais filtros: o mapa e a lista de resultados mostram os processos que se encaixam em <b>qualquer</b> um deles, combinados com os campos da aba Busca.</p>
+      <button id="btn-novo-filtro" class="link-acao">+ Criar filtro personalizado</button>
+      <form id="form-filtro" class="form caixa" hidden>
+        <input type="hidden" name="id">
+        <input name="nome" placeholder="Nome do filtro" required>
+        <label class="check"><input type="checkbox" name="usar_busca" checked> Incluir os campos preenchidos na aba Busca (substância, titular, UF, área…)</label>
+        <details open><summary>Regras sobre fase e último evento (expressões regulares, sem acento)</summary>
+          <div class="linha"><input name="fase" placeholder="Fase contém (ex.: LAVRA)"><input name="faseNao" placeholder="Fase NÃO contém"></div>
+          <div class="linha"><input name="evento" placeholder="Evento contém (ex.: EXIGENCIA)"><input name="eventoNao" placeholder="Evento NÃO contém"></div>
+          <div class="linha"><input name="diasEvento" type="number" min="0" placeholder="Evento nos últimos N dias"></div>
+        </details>
+        <div class="linha acoes"><button class="primario">Salvar filtro</button><button type="button" id="btn-cancelar-filtro">Cancelar</button></div>
+      </form>
+      <div class="grupo-cab"><span>Meus grupos minerários</span><button id="btn-novo-grupo" title="Novo grupo">+</button></div>
+      <div id="lista-grupos-min" class="lista-filtros"></div>
+      <div id="lista-filtros"></div>
+      <div class="rodape-filtros">
+        <button id="btn-limpar-filtros">Limpar filtros</button>
+        <button id="btn-ver-filtrados" class="primario">Ver lista de resultados</button>
+      </div>
+    </section>
+
     <!-- CAMADAS -->
     <section data-painel="camadas" class="painel">
-      <h3>Mapa base</h3>
-      <div id="bases" class="lista-simples"></div>
-      <h3>Camadas</h3>
-      <label class="check"><input type="checkbox" id="cam-processos" checked> Processos minerários (cor por fase)</label>
+      <details class="caixa">
+        <summary><b>☁ Importar KML e Shapefile</b></summary>
+        <p class="dica">Shapefile (.zip, em coordenadas geográficas), GeoJSON, KML ou KMZ. Útil para dados que não têm serviço online (ex.: shapefile do CNUC, SIGEF, quilombolas/INCRA).</p>
+        <form id="form-camada" class="form">
+          <div class="linha">
+            <input name="nome" placeholder="Nome da camada" required>
+            <input name="grupo" placeholder="Grupo (ex. Ambiental)">
+            <input name="cor" type="color" value="#e8590c" title="Cor">
+          </div>
+          <input type="file" name="arquivo" accept=".zip,.geojson,.json,.kml,.kmz" required>
+          <button class="primario">Enviar camada</button>
+        </form>
+      </details>
+      <div class="linha acoes">
+        <button id="btn-testar-camadas">Testar conexão de todas</button>
+        <span class="dica" id="status-teste"></span>
+      </div>
+      <div class="grupo-cab"><span>Base local</span></div>
+      <label class="check item-camada"><input type="checkbox" id="cam-processos" checked> Processos minerários importados (cor por fase)</label>
       <div id="legenda-fases" class="legenda"></div>
+      <div id="catalogo"></div>
+      <div class="grupo-cab"><span>Minhas camadas</span></div>
       <div id="lista-camadas" class="lista-simples"></div>
-      <h3>Adicionar camada</h3>
-      <p class="dica">Ex.: geologia (CPRM/SGB), unidades de conservação, terras indígenas, CAR/SIGEF, ocorrências minerais. Formatos: Shapefile (.zip, em coordenadas geográficas), GeoJSON, KML, KMZ.</p>
-      <form id="form-camada" class="form">
-        <div class="linha">
-          <input name="nome" placeholder="Nome da camada" required>
-          <input name="grupo" placeholder="Grupo (ex. Ambiental)">
-          <input name="cor" type="color" value="#e8590c" title="Cor">
-        </div>
-        <input type="file" name="arquivo" accept=".zip,.geojson,.json,.kml,.kmz" required>
-        <button class="primario">Enviar camada</button>
-      </form>
+      <div class="grupo-cab"><span>Mapa base</span></div>
+      <div id="bases" class="lista-simples"></div>
     </section>
 
     <!-- PAINEL -->
@@ -177,10 +210,24 @@
         </div>
         <button class="primario">Importar</button>
       </form>
+      <h3>Arrecadação CFEM (camada "Minas Ativas")</h3>
+      <p class="dica" id="info-cfem">Nenhuma planilha importada.</p>
+      <div class="linha acoes"><button id="btn-cfem-baixar" class="primario">Baixar da ANM</button>
+        <label class="botao-arquivo">Importar CSV<input type="file" id="arq-cfem" accept=".csv,.txt" hidden></label>
+        <label class="check"><input type="checkbox" id="cfem-mesclar"> Somar a planilha anterior (arquivos por período)</label></div>
       <h3>Configurações</h3>
       <form id="form-config" class="form">
         <label>URL da base ANM ({UF} = sigla)<input name="urlAnm"></label>
+        <label>URL da planilha CFEM (arrecadação)<input name="urlCfem"></label>
         <label>Link de consulta externa do processo ({NUMERO}, {ANO}, {PROCESSO})<input name="urlConsulta" placeholder="Opcional"></label>
+        <div class="linha">
+          <label>"Registro recente" = últimos N dias<input name="diasRecente" type="number" min="1"></label>
+          <label>Prazo estimado do alvará (anos)<input name="prazoAlvaraAnos" type="number" min="1" step="0.5"></label>
+        </div>
+        <div class="linha">
+          <label>Avisar vencimento com N dias<input name="diasAvisoVencimento" type="number" min="1"></label>
+          <label>Mina ativa = CFEM nos últimos N meses<input name="mesesCfem" type="number" min="1"></label>
+        </div>
         <div class="linha">
           <label>Atualizar a cada (horas, 0 = desligado)<input name="atualizacaoAutomaticaHoras" type="number" min="0"></label>
           <label>UFs automáticas (ex. MG,GO)<input name="ufsAutomaticas"></label>
@@ -199,6 +246,11 @@
 
   <div class="mapa-wrap">
     <div id="mapa"></div>
+    <form id="busca-rapida" class="busca-rapida">
+      <input name="termo" placeholder="Procurando um processo? (nº, titular ou substância)" autocomplete="off">
+      <button class="primario">Pesquisar</button>
+    </form>
+    <div id="filtros-ativos" class="filtros-ativos" hidden></div>
     <div id="mapa-aviso" class="mapa-aviso" hidden></div>
     <div id="coords" class="coords"></div>
   </div>

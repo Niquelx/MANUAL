@@ -117,6 +117,7 @@ export function normalizarProcesso(f) {
   let bbox;
   try { bbox = turf.bbox(f); } catch { return null; }
   if (bbox.some((v) => !Number.isFinite(v)) || Math.abs(bbox[0]) > 180 || Math.abs(bbox[1]) > 90) return null;
+  const ultEvento = limpar(campo(p, 'ULT_EVENTO', 'ULTIMO_EVENTO', 'EVENTO'));
   return {
     type: 'Feature',
     bbox,
@@ -126,7 +127,8 @@ export function normalizarProcesso(f) {
       ano: Number(ano) || null,
       area_ha: Math.round(area * 100) / 100,
       fase: limpar(campo(p, 'FASE')).toUpperCase(),
-      ult_evento: limpar(campo(p, 'ULT_EVENTO', 'ULTIMO_EVENTO', 'EVENTO')),
+      ult_evento: ultEvento,
+      data_evento: dataDoEvento(ultEvento),
       titular: limpar(campo(p, 'NOME', 'TITULAR', 'REQUERENTE')),
       substancia: limpar(campo(p, 'SUBS', 'SUBSTANCIA')).toUpperCase(),
       uso: limpar(campo(p, 'USO')).toUpperCase(),

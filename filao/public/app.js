@@ -38,6 +38,7 @@ function corFase(f) {
 const tagFase = (f) => `<span class="tag" style="background:${corFase(f)}">${esc(f || 'n/d')}</span>`;
 
 // ---------- Mapa ----------
+let ultimoCliqueFeicao = 0;
 const mapa = L.map('mapa', { zoomControl: true, preferCanvas: true }).setView([-15.8, -47.9], 5);
 const bases = {
   'OpenStreetMap': L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }),
@@ -53,10 +54,12 @@ mapa.pm.setLang('pt_br');
 mapa.on('mousemove', (e) => { $('#coords').textContent = `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`; });
 
 const camadaProcessos = L.geoJSON(null, {
-  style: (f) => ({ color: corFase(f.properties.fase), weight: 1.2, fillOpacity: 0.25 }),
+  style: (f) => (f.properties.removido_em
+    ? { color: f.properties.livre ? '#2f9e44' : '#868e96', weight: 1.5, dashArray: '5 4', fillOpacity: 0.12 }
+    : { color: corFase(f.properties.fase), weight: 1.2, fillOpacity: 0.25 }),
   onEachFeature: (f, l) => {
     l.bindTooltip(`<b>${esc(f.properties.processo)}</b><br>${esc(f.properties.fase)}<br>${esc(f.properties.substancia)}<br>${esc(f.properties.titular)}`, { sticky: true });
-    l.on('click', () => abrirProcesso(f.properties.processo));
+    l.on('click', () => { ultimoCliqueFeicao = Date.now(); abrirProcesso(f.properties.processo); });
   },
 }).addTo(mapa);
 const camadaDestaque = L.geoJSON(null, { style: { color: '#fab005', weight: 3, fillOpacity: 0.05 } }).addTo(mapa);
@@ -101,7 +104,7 @@ $('#abas').addEventListener('click', (e) => {
 function mostrarAba(nome) {
   $$('#abas button').forEach((x) => x.classList.toggle('ativa', x.dataset.aba === nome));
   $$('.painel').forEach((x) => x.classList.toggle('ativo', x.dataset.painel === nome));
-  ({ monitorados: carregarMonitorados, alertas: carregarAlertas, regioes: carregarRegioes, painel: carregarPainel, dados: carregarDados, camadas: carregarCamadas })[nome]?.();
+  ({ monitorados: carregarMonitorados, alertas: carregarAlertas, regioes: carregarRegioes, painel: carregarPainel, dados: carregarDados, camadas: () => { carregarCamadas(); renderCatalogo(); }, filtros: carregarFiltros })[nome]?.();
 }
 
 // ---------- Busca ----------
@@ -112,6 +115,8 @@ function lerFiltros() {
   const d = Object.fromEntries(new FormData(form));
   if (d.na_tela) { const b = mapa.getBounds(); d.bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(','); }
   delete d.na_tela;
+  if (filtrosMarcados.size) d.categorias = [...filtrosMarcados].join(',');
+  if (gruposMarcados.size) d.grupo = [...gruposMarcados].join(',');
   return d;
 }
 function limparFiltros(f) {
@@ -181,6 +186,11 @@ async function abrirProcesso(id) {
         <tr><td>Ano</td><td>${esc(p.ano)}</td></tr>
         <tr><td>Último evento</td><td>${esc(p.ult_evento)}</td></tr>
         <tr><td>Centroide</td><td>${centroTxt(d.feature.bbox)}</td></tr>
+        ${p.removido_em ? `<tr><td>Situação</td><td><b>Saiu da base ativa</b> em ${dataBR(p.removido_em)}${p.livre ? ' · área sem sobreposição com processos ativos (possível área livre)' : ''}</td></tr>` : ''}
+        ${d.vencimento_estimado ? `<tr><td>Vencimento (estimado)</td><td>${esc(d.vencimento_estimado.split('-').reverse().join('/'))} <span class="dica">alvará + prazo configurado</span></td></tr>` : ''}
+        ${d.cfem ? `<tr><td>CFEM</td><td>${d.cfem_ativa ? '<b>Mina ativa</b> · ' : ''}último recolhimento ${esc(d.cfem.ultimo)} · total R$ ${fmt(d.cfem.valor)}${d.cfem.municipio ? ' · ' + esc(d.cfem.municipio) : ''}</td></tr>` : ''}
+        <tr><td>Grupos</td><td>${d.grupos.map((g) => `<span class="tag" style="background:#495057">${esc(g.nome)}</span>`).join(' ') || '—'}
+          <select id="det-grupo"><option value="">+ adicionar a grupo…</option>${gruposCache.map((g) => `<option value="${esc(g.id)}">${esc(g.nome)}</option>`).join('')}<option value="__novo">Novo grupo…</option></select></td></tr>
       </table>
       <div class="linha acoes">
         <button id="det-zoom">Ver no mapa</button>
@@ -197,6 +207,12 @@ async function abrirProcesso(id) {
       <ul class="lista">${d.vizinhos.map(itemProcesso).join('')}</ul>`;
     $('#detalhe').hidden = false;
     $('#det-zoom').onclick = () => destacar(d.feature);
+    $('#det-grupo').onchange = async (ev) => {
+      let gid = ev.target.value; if (!gid) return;
+      if (gid === '__novo') { const nome = prompt('Nome do novo grupo:'); if (!nome) return; gid = (await post('/api/grupos', { nome })).id; }
+      await post('/api/grupos', { id: gid, processo: id }, 'PUT');
+      toast('Adicionado ao grupo.'); await carregarFiltros(); abrirProcesso(id);
+    };
     $('#det-mon').onclick = async () => {
       if (d.monitorado) await api('/api/monitorados?id=' + encodeURIComponent(id), { method: 'DELETE' });
       else await post('/api/monitorados', { processo: id });
@@ -418,7 +434,7 @@ async function carregarCamadas() {
   carregarCamadas.lista = lista;
 }
 async function ligarCamada(id, ligar) {
-  if (!ligar) { const l = camadasUsuario.get(id); if (l) mapa.removeLayer(l); camadasUsuario.delete(id); return; }
+  if (!ligar) { const l = camadasUsuario.get(id); if (l) mapa.removeLayer(l); camadasUsuario.delete(id); atualizarBadgeCamadas(); return; }
   const meta = carregarCamadas.lista.find((c) => c.id === id);
   const fc = await api('/api/camada?id=' + id);
   const l = L.geoJSON(fc, {
@@ -430,6 +446,7 @@ async function ligarCamada(id, ligar) {
     },
   }).addTo(mapa);
   camadasUsuario.set(id, l);
+  atualizarBadgeCamadas();
   return l;
 }
 $('#lista-camadas').addEventListener('change', (e) => { if (e.target.dataset.cam) ligarCamada(e.target.dataset.cam, e.target.checked); });
@@ -480,7 +497,9 @@ async function carregarDados() {
   $('#ufs-carregadas').innerHTML = r.ufs.map((u) => `<div><b>${esc(u.uf)}</b> ${fmt(u.total, 0)} processos <button data-uf-rm="${esc(u.uf)}">Remover</button> <button data-uf-up="${esc(u.uf)}">Atualizar da ANM</button></div>`).join('') || '<div class="sub">Base vazia. Baixe uma UF da ANM ou importe um arquivo.</div>';
   $('#lista-importacoes').innerHTML = r.importacoes.map((i) => `<li><div class="tit"><span>${esc(i.origem)}</span><span class="sub">${dataBR(i.data)}</span></div><div class="sub">${fmt(i.total, 0)} processos · ${fmt(i.novos, 0)} novos · ${fmt(i.alterados, 0)} alterados · ${i.alertas} alertas · UFs: ${esc(i.ufs.join(', '))}</div></li>`).join('');
   const fc = $('#form-config');
-  fc.urlAnm.value = cfg.urlAnm; fc.urlConsulta.value = cfg.urlConsulta;
+  fc.urlAnm.value = cfg.urlAnm; fc.urlConsulta.value = cfg.urlConsulta; fc.urlCfem.value = cfg.urlCfem;
+  for (const k of ['diasRecente', 'prazoAlvaraAnos', 'diasAvisoVencimento', 'mesesCfem']) fc[k].value = cfg[k];
+  $('#info-cfem').textContent = r.cfem ? `Importada em ${dataBR(r.cfem.data)} (${r.cfem.origem}): ${fmt(r.cfem.processos, 0)} processos com recolhimento; ${fmt(r.cfem.ativos_na_base, 0)} minas ativas na base local.` : 'Nenhuma planilha importada.';
   fc.atualizacaoAutomaticaHoras.value = cfg.atualizacaoAutomaticaHoras; fc.ufsAutomaticas.value = (cfg.ufsAutomaticas || []).join(',');
 }
 $('#ufs-carregadas').addEventListener('click', async (e) => {
@@ -510,7 +529,9 @@ $('#form-config').onsubmit = async (e) => {
   e.preventDefault();
   const f = e.target;
   await post('/api/config', {
-    urlAnm: f.urlAnm.value, urlConsulta: f.urlConsulta.value,
+    urlAnm: f.urlAnm.value, urlConsulta: f.urlConsulta.value, urlCfem: f.urlCfem.value,
+    diasRecente: Number(f.diasRecente.value) || 30, prazoAlvaraAnos: Number(f.prazoAlvaraAnos.value) || 3,
+    diasAvisoVencimento: Number(f.diasAvisoVencimento.value) || 180, mesesCfem: Number(f.mesesCfem.value) || 24,
     atualizacaoAutomaticaHoras: Number(f.atualizacaoAutomaticaHoras.value) || 0,
     ufsAutomaticas: f.ufsAutomaticas.value.split(/[,\s]+/).map((s) => s.toUpperCase()).filter(Boolean),
   }, 'PUT');
@@ -533,10 +554,333 @@ async function carregarOpcoes() {
   return r;
 }
 
+// ---------- Filtros (categorias, personalizados, grupos minerários) ----------
+const filtrosMarcados = new Set();
+const gruposMarcados = new Set();
+let gruposCache = [];
+let categoriasCache = null;
+const gruposFechados = new Set();
+
+async function carregarFiltros() {
+  const d = await api('/api/categorias');
+  categoriasCache = d;
+  gruposCache = d.gruposMinerarios;
+  const qtd = (id) => (d.contagens[id] != null ? `<span class="qtd">${fmt(d.contagens[id], 0)}</span>` : '');
+  const item = (c, extra = '') => `<div class="item-filtro"><label><input type="checkbox" data-filtro="${esc(c.id)}" ${filtrosMarcados.has(c.id) ? 'checked' : ''}> ${esc(c.nome)}</label>${c.nota ? `<span class="nota" title="${esc(c.nota)}">ⓘ</span>` : ''}${qtd(c.id)}${extra}</div>`;
+  $('#lista-grupos-min').innerHTML = d.gruposMinerarios.map((g) => `<div class="item-filtro"><label><input type="checkbox" data-grupo-min="${esc(g.id)}" ${gruposMarcados.has(g.id) ? 'checked' : ''}> <span class="tag" style="background:${esc(g.cor)}">&nbsp;</span> ${esc(g.nome)}</label><span class="qtd">${g.total}</span><button data-renomear-grupo="${esc(g.id)}" title="Renomear">✎</button><button data-del-grupo="${esc(g.id)}" title="Excluir">×</button></div>`).join('') || '<div class="dica">Crie grupos para organizar processos (clientes, projetos, alvos). Na ficha do processo use "adicionar a grupo".</div>';
+  let html = '';
+  const secoes = [...d.grupos.map((g) => [g, d.categorias.filter((c) => c.grupo === g)]), ['Meus filtros', d.personalizados]];
+  for (const [g, lista] of secoes) {
+    if (!lista.length) continue;
+    const fechado = gruposFechados.has(g);
+    html += `<div class="grupo-cab ${fechado ? 'fechado' : ''}" data-grupo-cab="${esc(g)}"><span>${esc(g)}</span><span class="seta">▴</span></div><div class="grupo-corpo ${fechado ? 'fechado' : ''}">`;
+    html += lista.map((c) => item(c, g === 'Meus filtros' ? `<button data-editar-filtro="${esc(c.id)}">✎</button><button data-del-filtro="${esc(c.id)}">×</button>` : '')).join('');
+    html += '</div>';
+  }
+  $('#lista-filtros').innerHTML = html;
+  atualizarChipsFiltros();
+}
+function atualizarChipsFiltros() {
+  const nomes = new Map();
+  if (categoriasCache) for (const c of [...categoriasCache.categorias, ...categoriasCache.personalizados]) nomes.set(c.id, c.nome);
+  const chips = [...[...filtrosMarcados].map((id) => [id, nomes.get(id) || id, 'f']), ...[...gruposMarcados].map((id) => [id, (gruposCache.find((g) => g.id === id) || {}).nome || id, 'g'])];
+  const el = $('#filtros-ativos');
+  el.innerHTML = chips.map(([id, n, t]) => `<span data-rm-chip="${esc(id)}" data-t="${t}" title="Remover filtro">${esc(n)} ×</span>`).join('');
+  el.hidden = !chips.length;
+  const b = $('#badge-filtros'); b.textContent = chips.length; b.hidden = !chips.length;
+}
+$('#filtros-ativos').addEventListener('click', (e) => {
+  const c = e.target.closest('[data-rm-chip]'); if (!c) return;
+  (c.dataset.t === 'g' ? gruposMarcados : filtrosMarcados).delete(c.dataset.rmChip);
+  carregarFiltros(); buscar(0);
+});
+$('[data-painel="filtros"]').addEventListener('change', (e) => {
+  const f = e.target.dataset.filtro, g = e.target.dataset.grupoMin;
+  if (f) e.target.checked ? filtrosMarcados.add(f) : filtrosMarcados.delete(f);
+  if (g) e.target.checked ? gruposMarcados.add(g) : gruposMarcados.delete(g);
+  if (f || g) { atualizarChipsFiltros(); buscar(0); }
+});
+$('[data-painel="filtros"]').addEventListener('click', async (e) => {
+  const cab = e.target.closest('[data-grupo-cab]');
+  if (cab) { const g = cab.dataset.grupoCab; gruposFechados.has(g) ? gruposFechados.delete(g) : gruposFechados.add(g); cab.classList.toggle('fechado'); cab.nextElementSibling.classList.toggle('fechado'); return; }
+  const delF = e.target.closest('[data-del-filtro]'), edF = e.target.closest('[data-editar-filtro]');
+  const delG = e.target.closest('[data-del-grupo]'), renG = e.target.closest('[data-renomear-grupo]');
+  if (delF && confirm('Excluir este filtro?')) { filtrosMarcados.delete(delF.dataset.delFiltro); await api('/api/filtros?id=' + delF.dataset.delFiltro, { method: 'DELETE' }); carregarFiltros(); }
+  if (edF) {
+    const c = categoriasCache.personalizados.find((x) => x.id === edF.dataset.editarFiltro);
+    const fm = $('#form-filtro'); fm.hidden = false; fm.reset();
+    fm.id.value = c.id; fm.nome.value = c.nome;
+    for (const k of ['fase', 'faseNao', 'evento', 'eventoNao', 'diasEvento']) fm[k].value = c.regra?.[k] || '';
+    fm.usar_busca.checked = !!Object.keys(c.parametros || {}).length;
+  }
+  if (delG && confirm('Excluir este grupo? Os processos não são apagados.')) { gruposMarcados.delete(delG.dataset.delGrupo); await api('/api/grupos?id=' + delG.dataset.delGrupo, { method: 'DELETE' }); carregarFiltros(); }
+  if (renG) { const nome = prompt('Novo nome do grupo:'); if (nome) { await post('/api/grupos', { id: renG.dataset.renomearGrupo, nome }, 'PUT'); carregarFiltros(); } }
+});
+$('#btn-novo-grupo').onclick = async (e) => {
+  e.stopPropagation();
+  const nome = prompt('Nome do grupo minerário (ex.: Cliente X, Alvos de ouro):'); if (!nome) return;
+  const cores = ['#1c7ed6', '#e8590c', '#2f9e44', '#9c36b5', '#c92a2a', '#0b7285'];
+  await post('/api/grupos', { nome, cor: cores[gruposCache.length % cores.length] }); carregarFiltros();
+};
+$('#btn-novo-filtro').onclick = () => { const f = $('#form-filtro'); f.reset(); f.id.value = ''; f.hidden = false; f.nome.focus(); };
+$('#btn-cancelar-filtro').onclick = () => { $('#form-filtro').hidden = true; };
+$('#form-filtro').onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const regra = {};
+  for (const k of ['fase', 'faseNao', 'evento', 'eventoNao']) if (f[k].value.trim()) regra[k] = f[k].value.trim();
+  if (Number(f.diasEvento.value)) regra.diasEvento = Number(f.diasEvento.value);
+  let parametros = {};
+  if (f.usar_busca.checked) { parametros = Object.fromEntries(new FormData(form)); delete parametros.na_tela; delete parametros.ordem; delete parametros.dir; }
+  if (!Object.keys(regra).length && !Object.values(parametros).some((v) => v)) return toast('Preencha ao menos uma regra ou um campo da busca.');
+  try {
+    const salvo = await post('/api/filtros', { id: f.id.value || undefined, nome: f.nome.value, regra, parametros });
+    filtrosMarcados.add(salvo.id); f.hidden = true; toast('Filtro salvo.'); await carregarFiltros(); buscar(0);
+  } catch (err) { toast(err.message, 6000); }
+};
+$('#btn-limpar-filtros').onclick = () => { filtrosMarcados.clear(); gruposMarcados.clear(); carregarFiltros(); buscar(0); };
+$('#btn-ver-filtrados').onclick = () => { mostrarAba('busca'); buscar(0); };
+
+// ---------- Busca rápida sobre o mapa ----------
+$('#busca-rapida').onsubmit = async (e) => {
+  e.preventDefault();
+  const termo = e.target.termo.value.trim(); if (!termo) return;
+  const ehNumero = /^\d[\d.\/\s-]*$/.test(termo);
+  // Procura em toda a base, sem aplicar os filtros marcados
+  const r = await api('/api/busca?' + new URLSearchParams({ [ehNumero ? 'processo' : 'q']: termo, limite: 50 }));
+  if (!r.total) return toast('Nenhum processo encontrado na base local.');
+  if (r.total === 1 || ehNumero) {
+    const p = r.itens[0];
+    if (p.bbox) irBbox(p.bbox);
+    abrirProcesso(p.processo);
+  }
+  if (r.total > 1) {
+    mostrarAba('busca');
+    $('#resultado-info').textContent = `${fmt(r.total, 0)} processo(s) para "${termo}" (sem filtros)`;
+    $('#resultados').innerHTML = r.itens.map(itemProcesso).join('');
+    $('#paginacao').innerHTML = ''; $('#facetas').innerHTML = '';
+  }
+};
+
+// ---------- Camadas oficiais (catálogo) ----------
+mapa.createPane('oficiais'); mapa.getPane('oficiais').style.zIndex = 350;
+const ArcGISExport = L.TileLayer.extend({
+  initialize(url, opcoes) { this._urlServico = url; L.TileLayer.prototype.initialize.call(this, '', opcoes); },
+  getTileUrl(c) {
+    const t = this.getTileSize();
+    const nw = this._map.unproject(c.scaleBy(t), c.z), se = this._map.unproject(c.scaleBy(t).add(t), c.z);
+    const a = L.CRS.EPSG3857.project(nw), b = L.CRS.EPSG3857.project(se);
+    const p = new URLSearchParams({
+      bbox: [a.x, b.y, b.x, a.y].join(','), bboxSR: '3857', imageSR: '3857', size: `${t.x},${t.y}`,
+      format: 'png32', transparent: 'true', dpi: '96', f: 'image',
+    });
+    if (this.options.ids?.length) p.set('layers', 'show:' + this.options.ids.join(','));
+    return `${this._urlServico}/export?${p}`;
+  },
+});
+let catalogo = { grupos: [], camadas: [] };
+const camadasOficiais = new Map(); // id -> layer
+const opacidades = new Map();
+const abertos = new Set();
+const legendasCache = new Map();
+
+async function carregarCatalogo() { catalogo = await api('/api/catalogo'); return catalogo; }
+function camadaCat(id) { return catalogo.camadas.find((c) => c.id === id); }
+function ligada(id) {
+  const c = camadaCat(id);
+  if (c?.tipo === 'composta') return c.componentes.every((x) => camadasOficiais.has(x));
+  return camadasOficiais.has(id);
+}
+
+function criarCamada(c) {
+  const opacity = opacidades.get(c.id) ?? (c.tipo === 'arcgis' && /geologia/.test(c.id) ? 0.6 : 0.75);
+  const comum = { pane: 'oficiais', opacity, minZoom: c.minZoom || 0, maxZoom: 22, attribution: c.fonte, crossOrigin: false };
+  if (c.tipo === 'wms') {
+    return L.tileLayer.wms(c.url, { ...comum, layers: c.camada, format: 'image/png', transparent: true, version: '1.1.1', styles: '' });
+  }
+  if (c.tipo === 'arcgis') return new ArcGISExport(c.url, { ...comum, ids: c.camadas });
+  if (c.tipo === 'local') {
+    const g = L.geoJSON(null, {
+      style: { color: c.cor || '#f08c00', weight: 2, fillOpacity: 0.45 },
+      onEachFeature: (f, l) => { l.bindTooltip(`<b>${esc(f.properties.processo)}</b><br>Mina ativa (CFEM)<br>${esc(f.properties.substancia)}`); l.on('click', () => { ultimoCliqueFeicao = Date.now(); abrirProcesso(f.properties.processo); }); },
+    });
+    g._atualizar = async () => {
+      if (mapa.getZoom() < 6) { g.clearLayers(); return; }
+      const b = mapa.getBounds();
+      const fc = await api('/api/mapa?' + new URLSearchParams({ categorias: c.categoria, bbox: [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(',') }));
+      g.clearLayers().addData(fc);
+    };
+    g._atualizar();
+    return g;
+  }
+  return null;
+}
+
+async function ligarOficial(id, ligar) {
+  const c = camadaCat(id);
+  if (!c) return;
+  if (c.tipo === 'composta') { for (const x of c.componentes) await ligarOficial(x, ligar); return; }
+  const atual = camadasOficiais.get(id);
+  if (!ligar) { if (atual) mapa.removeLayer(atual); camadasOficiais.delete(id); atualizarBadgeCamadas(); return; }
+  if (atual) return;
+  const verificar = async () => {
+    const r = await post('/api/catalogo/verificar', { ids: [id] });
+    await carregarCatalogo();
+    if (r[id].status !== 'ok') toast(`${c.nome}: ${r[id].mensagem || r[id].status}`, 8000);
+    return r[id];
+  };
+  // Camadas cujo nome só é conhecido após consultar o serviço: verifica antes de desenhar
+  if (c.precisaResolver) {
+    toast(`Localizando "${c.nome}" no serviço oficial…`);
+    try { await verificar(); } catch (e) { toast(e.message); }
+    if (camadaCat(id).precisaResolver) { renderCatalogo(); return; }
+  }
+  const camada = criarCamada(camadaCat(id));
+  if (!camada) return;
+  camada.addTo(mapa);
+  camadasOficiais.set(id, camada);
+  if (c.minZoom && mapa.getZoom() < c.minZoom) toast(`${c.nome}: aproxime até o zoom ${c.minZoom} para ver.`);
+  // Demais camadas: desenha já com o endereço padrão e confere em segundo plano
+  if (c.status === 'nao_verificada' && !c.precisaResolver && c.tipo !== 'local') {
+    verificar().then((r) => {
+      const n = camadaCat(id);
+      if (r.status === 'ok' && camadasOficiais.get(id) === camada && (n.url !== c.url || n.camada !== c.camada || String(n.camadas) !== String(c.camadas))) {
+        mapa.removeLayer(camada);
+        const nova = criarCamada(n); nova.addTo(mapa); camadasOficiais.set(id, nova);
+      }
+      renderCatalogo();
+    }).catch(() => {});
+  }
+  atualizarBadgeCamadas();
+}
+function atualizarBadgeCamadas() {
+  const n = camadasOficiais.size + camadasUsuario.size;
+  const b = $('#badge-camadas'); b.textContent = n; b.hidden = !n;
+}
+mapa.on('moveend', () => { for (const l of camadasOficiais.values()) l._atualizar?.(); });
+
+async function renderCatalogo() {
+  if (!catalogo.camadas.length) await carregarCatalogo();
+  let html = '';
+  for (const g of catalogo.grupos) {
+    const lista = catalogo.camadas.filter((c) => c.grupos.includes(g));
+    const fechado = gruposFechados.has('cam:' + g);
+    html += `<div class="grupo-cab ${fechado ? 'fechado' : ''}" data-grupo-cam="${esc(g)}"><span>${esc(g)}</span><span class="seta">▴</span></div><div class="grupo-corpo ${fechado ? 'fechado' : ''}">`;
+    for (const c of lista) {
+      const st = c.tipo === 'composta' || c.tipo === 'local' ? 'ok' : c.status;
+      html += `<div class="item-camada"><label><input type="checkbox" data-oficial="${esc(c.id)}" ${ligada(c.id) ? 'checked' : ''}> <span class="status ${esc(st)}" title="${esc(st === 'ok' ? 'Conexão verificada' : st === 'nao_verificada' ? 'Ainda não testada' : c.mensagem)}"></span> ${esc(c.nome)}</label><span class="fonte">${esc(c.fonte)}</span><button data-info-cam="${esc(c.id)}" title="Detalhes, opacidade e legenda">ⓘ</button></div>`;
+      if (abertos.has(c.id)) html += detalheCamada(c);
+    }
+    html += '</div>';
+  }
+  $('#catalogo').innerHTML = html;
+  for (const id of abertos) carregarLegenda(id);
+}
+function detalheCamada(c) {
+  const ed = c.tipo === 'wms' || c.tipo === 'arcgis';
+  return `<div class="camada-detalhe" data-det="${esc(c.id)}">
+    <div>${esc(c.descricao || '')}</div>
+    ${c.info ? `<div><a href="${esc(c.info)}" target="_blank" rel="noopener">Fonte oficial ↗</a></div>` : ''}
+    ${c.mensagem ? `<div class="msg">${esc(c.mensagem)}</div>` : ''}
+    ${c.subcamadas?.length ? `<div class="dica">Subcamadas: ${esc(c.subcamadas.slice(0, 12).join('; '))}</div>` : ''}
+    ${c.tipo !== 'composta' ? `<label>Opacidade <input type="range" min="0.1" max="1" step="0.05" value="${opacidades.get(c.id) ?? 0.75}" data-opac="${esc(c.id)}"></label>` : ''}
+    <div class="legenda-camada" id="leg-${esc(c.id)}"></div>
+    ${ed ? `<details><summary>Endereço do serviço (${esc(c.tipo.toUpperCase())})</summary>
+      <div class="form"><input data-ed-url="${esc(c.id)}" value="${esc(c.url || '')}">
+      <input data-ed-camada="${esc(c.id)}" value="${esc(c.tipo === 'wms' ? c.camada || '' : (c.camadas || []).join(','))}" placeholder="${c.tipo === 'wms' ? 'nome da camada WMS' : 'IDs das subcamadas (ex. 0,1)'}">
+      <div class="linha acoes"><button data-salvar-cam="${esc(c.id)}">Salvar e testar</button><button data-testar-cam="${esc(c.id)}">Testar</button>${c.manual ? `<button data-restaurar-cam="${esc(c.id)}">Restaurar padrão</button>` : ''}</div></div>
+      ${c.verificado_em ? `<div class="dica">Verificado em ${dataBR(c.verificado_em)}</div>` : ''}</details>` : ''}
+  </div>`;
+}
+async function carregarLegenda(id) {
+  const c = camadaCat(id); const el = document.getElementById('leg-' + id);
+  if (!el || !c || !['wms', 'arcgis'].includes(c.tipo)) return;
+  try {
+    if (!legendasCache.has(id)) legendasCache.set(id, await api('/api/catalogo/legenda?id=' + id));
+    const itens = legendasCache.get(id);
+    el.innerHTML = itens.slice(0, 40).map((i) => `<div><img src="${esc(i.imagem)}" alt="" loading="lazy">${esc(i.rotulo)}</div>`).join('');
+  } catch { el.innerHTML = '<span class="dica">Legenda indisponível.</span>'; }
+}
+$('#catalogo').addEventListener('change', (e) => {
+  const id = e.target.dataset.oficial;
+  if (id) ligarOficial(id, e.target.checked).then(renderCatalogo);
+});
+$('#catalogo').addEventListener('input', (e) => {
+  const id = e.target.dataset.opac; if (!id) return;
+  opacidades.set(id, Number(e.target.value));
+  camadasOficiais.get(id)?.setOpacity?.(Number(e.target.value));
+  camadasOficiais.get(id)?.setStyle?.({ fillOpacity: Number(e.target.value) * 0.6, opacity: Number(e.target.value) });
+});
+$('#catalogo').addEventListener('click', async (e) => {
+  const cab = e.target.closest('[data-grupo-cam]');
+  if (cab) { const g = 'cam:' + cab.dataset.grupoCam; gruposFechados.has(g) ? gruposFechados.delete(g) : gruposFechados.add(g); cab.classList.toggle('fechado'); cab.nextElementSibling.classList.toggle('fechado'); return; }
+  const info = e.target.closest('[data-info-cam]');
+  if (info) { const id = info.dataset.infoCam; abertos.has(id) ? abertos.delete(id) : abertos.add(id); renderCatalogo(); return; }
+  const recarregar = async (id) => {
+    legendasCache.delete(id); await carregarCatalogo();
+    if (camadasOficiais.has(id)) { mapa.removeLayer(camadasOficiais.get(id)); camadasOficiais.delete(id); await ligarOficial(id, true); }
+    renderCatalogo();
+  };
+  const sv = e.target.closest('[data-salvar-cam]'), ts = e.target.closest('[data-testar-cam]'), rs = e.target.closest('[data-restaurar-cam]');
+  if (sv) {
+    const id = sv.dataset.salvarCam, c = camadaCat(id);
+    const url = $(`[data-ed-url="${id}"]`).value.trim(), cam = $(`[data-ed-camada="${id}"]`).value.trim();
+    const r = await post('/api/catalogo', c.tipo === 'wms' ? { id, url, camada: cam } : { id, url, camadas: cam ? cam.split(',').map(Number) : [] }, 'PUT');
+    toast(`${c.nome}: ${r.status === 'ok' ? 'conexão OK' : r.mensagem || r.status}`, 6000); recarregar(id);
+  }
+  if (ts) { const id = ts.dataset.testarCam; const r = (await post('/api/catalogo/verificar', { ids: [id] }))[id]; toast(`${camadaCat(id).nome}: ${r.status === 'ok' ? 'conexão OK' : r.mensagem || r.status}`, 7000); recarregar(id); }
+  if (rs) { const id = rs.dataset.restaurarCam; await post('/api/catalogo', { id, restaurar: true }, 'PUT'); recarregar(id); }
+});
+$('#btn-testar-camadas').onclick = async () => {
+  $('#status-teste').textContent = 'Testando serviços oficiais…';
+  try {
+    const r = await post('/api/catalogo/verificar', {});
+    const v = Object.values(r).filter((x) => x.status);
+    $('#status-teste').textContent = `${v.filter((x) => x.status === 'ok').length} de ${v.length} respondendo.`;
+  } catch (e) { $('#status-teste').textContent = e.message; }
+  legendasCache.clear(); await carregarCatalogo(); renderCatalogo();
+};
+
+// Clique no mapa: atributos das camadas oficiais ligadas
+mapa.on('click', async (e) => {
+  if (Date.now() - ultimoCliqueFeicao < 400 || mapa.pm.globalDrawModeEnabled()) return;
+  const ids = [...camadasOficiais.keys()].filter((id) => ['wms', 'arcgis'].includes(camadaCat(id)?.tipo));
+  if (!ids.length) return;
+  const b = mapa.getBounds(), tam = mapa.getSize(), pt = mapa.latLngToContainerPoint(e.latlng);
+  const popup = L.popup({ maxWidth: 360 }).setLatLng(e.latlng).setContent('<div class="popup-consulta">Consultando camadas…</div>').openOn(mapa);
+  try {
+    const r = await post('/api/catalogo/consultar', {
+      ids, lat: e.latlng.lat, lng: e.latlng.lng, bbox: [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(','),
+      largura: tam.x, altura: tam.y, x: pt.x, y: pt.y,
+    });
+    const html = r.map((g) => `<h4>${esc(g.nome)} <span class="fonte">${esc(g.fonte)}</span></h4>${g.erro ? `<div class="dica">${esc(g.erro)}</div>` : g.itens.map((it) => it.texto ? `<pre>${esc(it.texto)}</pre>` : `<table>${Object.entries(it.atributos || {}).filter(([k, v]) => v !== null && v !== '' && !/^(shape|objectid|fid|the_geom|geom)/i.test(k)).slice(0, 25).map(([k, v]) => `<tr><td><b>${esc(k)}</b></td><td>${esc(v)}</td></tr>`).join('')}</table>`).join('<hr>')}`).join('');
+    popup.setContent(`<div class="popup-consulta">${html || 'Nada encontrado neste ponto.'}</div>`);
+  } catch (err) { popup.setContent(`<div class="popup-consulta">${esc(err.message)}</div>`); }
+});
+
+// CFEM
+$('#btn-cfem-baixar').onclick = async () => {
+  toast('Baixando planilha da CFEM… pode demorar.', 60000);
+  try { const r = await post('/api/cfem/baixar', {}); toast(`CFEM: ${fmt(r.processos, 0)} processos; ${fmt(r.ativos_na_base, 0)} minas ativas na base.`, 8000); }
+  catch (e) { toast('Falha: ' + e.message, 10000); }
+  carregarDados();
+};
+$('#arq-cfem').onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  toast('Importando CFEM…', 60000);
+  try {
+    const r = await api(`/api/cfem?arquivo=${encodeURIComponent(f.name)}&modo=${$('#cfem-mesclar').checked ? 'mesclar' : 'substituir'}`, { method: 'POST', body: f });
+    toast(`CFEM: ${fmt(r.linhas, 0)} linhas, ${fmt(r.processos, 0)} processos, ${fmt(r.ativos_na_base, 0)} minas ativas na base.`, 8000);
+  } catch (err) { toast(err.message, 8000); }
+  e.target.value = ''; carregarDados();
+};
+
 // ---------- Início ----------
 montarBases();
 carregarOpcoes().then((r) => { if (r.total) buscar(0); });
 carregarCamadas();
+carregarFiltros();
+carregarCatalogo().then(renderCatalogo);
 carregarRegioes();
 atualizarBadge();
 })();

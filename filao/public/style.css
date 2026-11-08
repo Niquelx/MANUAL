@@ -85,3 +85,39 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: v
   .marca { display: none; }
   .detalhe { top: 56px; left: 8px; right: 8px; width: auto; }
 }
+
+/* ---------- Filtros e camadas ---------- */
+.badge-info { background: var(--primaria); }
+.link-acao { border: 0; background: none; color: var(--primaria); padding: 6px 0; font-weight: 600; }
+.caixa { border: 1px solid var(--borda); border-radius: 6px; padding: 8px; margin: 6px 0; }
+.grupo-cab { display: flex; justify-content: space-between; align-items: center; margin: 14px 0 4px; padding: 6px 8px; background: color-mix(in srgb, var(--primaria) 9%, transparent); border-left: 3px solid var(--primaria); border-radius: 3px; font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: .03em; cursor: pointer; user-select: none; }
+.grupo-cab button { padding: 0 8px; font-weight: 700; }
+.grupo-cab .seta { transition: transform .15s; }
+.grupo-cab.fechado .seta { transform: rotate(180deg); }
+.grupo-corpo.fechado { display: none; }
+.item-filtro, .item-camada { display: flex; align-items: center; gap: 8px; padding: 7px 4px; border-bottom: 1px solid var(--borda); font-size: 13.5px; }
+.item-filtro label, .item-camada label { flex: 1; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.item-filtro .qtd { color: var(--suave); font-size: 12px; }
+.item-filtro .nota, .item-camada .nota { cursor: help; color: var(--suave); }
+.item-filtro button, .item-camada button { padding: 1px 6px; font-size: 12px; }
+.rodape-filtros { position: sticky; bottom: 0; background: var(--painel); display: flex; gap: 6px; justify-content: space-between; padding: 8px 0; border-top: 1px solid var(--borda); margin-top: 10px; }
+.status { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; background: #adb5bd; }
+.status.ok { background: var(--ok); }
+.status.erro, .status.nao_encontrada { background: var(--alerta); }
+.fonte { font-size: 11px; color: var(--suave); white-space: nowrap; }
+.camada-detalhe { padding: 6px 4px 10px 26px; font-size: 12.5px; border-bottom: 1px solid var(--borda); }
+.camada-detalhe input[type=range] { width: 100%; }
+.camada-detalhe .legenda-camada img { max-width: 100%; display: block; }
+.camada-detalhe .legenda-camada div { display: flex; align-items: center; gap: 6px; font-size: 11.5px; }
+.camada-detalhe .msg { color: var(--alerta); word-break: break-word; }
+.busca-rapida { position: absolute; top: 10px; left: 60px; right: 60px; max-width: 560px; z-index: 600; display: flex; gap: 0; box-shadow: 0 2px 8px #0003; border-radius: 6px; }
+.busca-rapida input { flex: 1; border-radius: 6px 0 0 6px; padding: 9px 12px; border-right: 0; }
+.busca-rapida button { border-radius: 0 6px 6px 0; }
+.filtros-ativos { position: absolute; top: 54px; left: 60px; right: 60px; z-index: 590; display: flex; gap: 4px; flex-wrap: wrap; }
+.filtros-ativos span { background: var(--painel); border: 1px solid var(--borda); border-radius: 12px; padding: 2px 8px; font-size: 12px; box-shadow: 0 1px 4px #0002; cursor: pointer; }
+.mapa-aviso { top: 92px; }
+.popup-consulta { max-height: 260px; overflow: auto; font-size: 12px; min-width: 220px; }
+.popup-consulta h4 { margin: 6px 0 2px; font-size: 12.5px; }
+.popup-consulta table td { padding: 1px 4px; border-bottom: 1px solid #eee; vertical-align: top; }
+.popup-consulta pre { white-space: pre-wrap; font-size: 11px; }
+@media (max-width: 800px) { .busca-rapida, .filtros-ativos { left: 50px; right: 10px; } }

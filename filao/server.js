@@ -2,9 +2,14 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Base } from './lib/base.js';
 import { lerArquivoGeo } from './lib/importador.js';
+import { CATEGORIAS, GRUPOS_CATEGORIAS } from './lib/categorias.js';
+import { CATALOGO, GRUPOS_CAMADAS, camadaPorId } from './lib/catalogo.js';
+import { resolver, consultar, legenda } from './lib/geoservicos.js';
+import { lerCfem } from './lib/cfem.js';
 
 const RAIZ = path.dirname(fileURLToPath(import.meta.url));
 const PORTA = Number(process.env.PORTA || process.env.PORT || 3210);
@@ -105,6 +110,69 @@ async function baixarAnm(uf) {
   return base.importarProcessos(features, { ufPadrao: uf, origem: `ANM ${uf}` });
 }
 
+// ---------- Catálogo de camadas oficiais ----------
+function camadaEfetiva(id) {
+  const c = camadaPorId(id);
+  if (!c) return null;
+  const cache = base.catalogoCache[id];
+  if (!cache?.manual) return c;
+  const temCamada = !!cache.camada;
+  const temIds = !!cache.camadas?.length;
+  return {
+    ...c,
+    url: cache.url || c.url,
+    camada: temCamada ? cache.camada : c.camada,
+    camadas: temIds ? cache.camadas : c.camadas,
+    busca: temCamada ? null : c.busca,
+    multiplas: temCamada ? false : c.multiplas,
+    buscaSubcamada: temIds ? null : c.buscaSubcamada,
+  };
+}
+
+function camadaResolvida(id) {
+  const c = camadaEfetiva(id);
+  const cache = base.catalogoCache[id];
+  if (cache?.status === 'ok') return { url: cache.url, camada: cache.camada, camadas: cache.camadas };
+  return { url: c.url, camada: c.camada, camadas: c.camadas };
+}
+
+async function verificarCamada(id) {
+  const c = camadaEfetiva(id);
+  if (!c || c.tipo === 'composta' || c.tipo === 'local') return { status: 'ok' };
+  const r = await resolver(c);
+  base.catalogoCache[id] = { ...(base.catalogoCache[id]?.manual ? { manual: true } : {}), ...r };
+  base.salvarCatalogo();
+  return base.catalogoCache[id];
+}
+
+function listarCatalogo() {
+  return {
+    grupos: GRUPOS_CAMADAS,
+    camadas: CATALOGO.map((c) => {
+      const e = camadaEfetiva(c.id);
+      const r = camadaResolvida(c.id);
+      const cache = base.catalogoCache[c.id] || {};
+      return {
+        id: c.id, nome: c.nome, grupos: c.grupos, fonte: c.fonte, tipo: c.tipo, info: c.info, descricao: c.descricao,
+        minZoom: c.minZoom || 0, componentes: c.componentes, categoria: c.categoria, cor: c.cor,
+        url: r.url || e.url, camada: r.camada, camadas: r.camadas,
+        status: cache.status || 'nao_verificada', mensagem: cache.mensagem || '', verificado_em: cache.verificado_em || null,
+        manual: !!cache.manual, subcamadas: cache.subcamadas || null,
+        precisaResolver: (c.tipo === 'wms' && !r.camada) || (!!e.buscaSubcamada && !(r.camadas || []).length),
+      };
+    }),
+  };
+}
+
+// ---------- CFEM ----------
+async function baixarCfem() {
+  const url = base.estado.config.urlCfem;
+  const r = await fetch(url, { signal: AbortSignal.timeout(15 * 60 * 1000) });
+  if (!r.ok) throw new Error(`Falha ao baixar ${url}: HTTP ${r.status}`);
+  const { mapa, linhas } = lerCfem(Buffer.from(await r.arrayBuffer()));
+  return { ...base.importarCfem(mapa, url), linhas };
+}
+
 // ---------- Rotas da API ----------
 async function api(req, res, url) {
   const q = Object.fromEntries(url.searchParams);
@@ -120,6 +188,8 @@ async function api(req, res, url) {
       regioes: base.estado.regioes.length,
       alertas_nao_lidos: base.estado.alertas.filter((a) => !a.lido).length,
       importacoes: base.estado.importacoes.slice(0, 10),
+      removidos: base.removidos.size,
+      cfem: base.estado.cfemInfo,
       facetas: base.facetas(todos),
     });
   }
@@ -148,7 +218,7 @@ async function api(req, res, url) {
   }
 
   if (r === '/api/processo' && m === 'GET') {
-    const f = base.indice.get(q.id);
+    const f = base.indice.get(q.id) || base.removidos.get(q.id);
     if (!f) return enviarJson(res, { erro: 'Processo não encontrado na base local.' }, 404);
     const mon = base.estado.monitorados.find((x) => x.processo === q.id);
     const [numero, ano] = [f.properties.numero, f.properties.ano];
@@ -156,6 +226,10 @@ async function api(req, res, url) {
       ? base.estado.config.urlConsulta.replace('{NUMERO}', numero).replace('{ANO}', ano).replace('{PROCESSO}', encodeURIComponent(q.id))
       : '';
     return enviarJson(res, {
+      cfem: base.cfemDe(f.properties),
+      cfem_ativa: base.cfemAtiva(f.properties),
+      vencimento_estimado: base.vencimento(f),
+      grupos: base.estado.grupos.filter((g) => g.processos.includes(q.id)).map((g) => ({ id: g.id, nome: g.nome })),
       feature: f,
       historico: base.estado.historico[q.id] || [],
       alertas: base.estado.alertas.filter((a) => a.processo === q.id),
@@ -187,6 +261,107 @@ async function api(req, res, url) {
     res.writeHead(200, { 'Content-Type': tipo, 'Content-Disposition': `attachment; filename="${nome}.${fmt}"` });
     return res.end(corpo);
   }
+
+
+  // Filtros (categorias prontas + filtros personalizados + grupos minerários)
+  if (r === '/api/categorias' && m === 'GET') {
+    return enviarJson(res, {
+      grupos: GRUPOS_CATEGORIAS,
+      categorias: CATEGORIAS.filter((c) => c.grupo).map(({ id, nome, grupo, nota, regra }) => ({ id, nome, grupo, nota, regra })),
+      personalizados: base.estado.filtros,
+      gruposMinerarios: base.estado.grupos.map((g) => ({ id: g.id, nome: g.nome, cor: g.cor, total: g.processos.length })),
+      contagens: base.contarCategorias(),
+    });
+  }
+  if (r === '/api/filtros') {
+    if (m === 'POST') {
+      try { return enviarJson(res, base.salvarFiltro(await lerJson(req))); }
+      catch (e) { if (!e.status) e.status = 400; throw e; }
+    }
+    if (m === 'DELETE') {
+      base.estado.filtros = base.estado.filtros.filter((f) => f.id !== q.id);
+      base.salvarEstado();
+      return enviarJson(res, { ok: true });
+    }
+  }
+  if (r === '/api/grupos') {
+    if (m === 'GET') return enviarJson(res, base.estado.grupos);
+    if (m === 'POST') {
+      const { nome, cor = '#1c7ed6', processos = [] } = await lerJson(req);
+      if (!nome) return enviarJson(res, { erro: 'Informe o nome do grupo.' }, 400);
+      const g = { id: 'g_' + crypto.randomUUID().slice(0, 8), nome, cor, processos, criado: new Date().toISOString() };
+      base.estado.grupos.push(g);
+      base.salvarEstado();
+      return enviarJson(res, g);
+    }
+    if (m === 'PUT') {
+      const { id, processo, acao = 'adicionar', nome, cor } = await lerJson(req);
+      const g = base.estado.grupos.find((x) => x.id === id);
+      if (!g) return enviarJson(res, { erro: 'Grupo não encontrado.' }, 404);
+      if (nome) g.nome = nome;
+      if (cor) g.cor = cor;
+      if (processo) {
+        const lista = Array.isArray(processo) ? processo : [processo];
+        if (acao === 'remover') g.processos = g.processos.filter((p) => !lista.includes(p));
+        else for (const p of lista) if (!g.processos.includes(p)) g.processos.push(p);
+      }
+      base.salvarEstado();
+      return enviarJson(res, g);
+    }
+    if (m === 'DELETE') {
+      base.estado.grupos = base.estado.grupos.filter((g) => g.id !== q.id);
+      base.salvarEstado();
+      return enviarJson(res, { ok: true });
+    }
+  }
+
+  // Catálogo de camadas oficiais
+  if (r === '/api/catalogo' && m === 'GET') return enviarJson(res, listarCatalogo());
+  if (r === '/api/catalogo' && m === 'PUT') {
+    const { id, url, camada, camadas, restaurar } = await lerJson(req);
+    if (!camadaPorId(id)) return enviarJson(res, { erro: 'Camada desconhecida.' }, 404);
+    if (restaurar) delete base.catalogoCache[id];
+    else {
+      if (url && !/^https?:\/\//i.test(url)) return enviarJson(res, { erro: 'URL inválida.' }, 400);
+      base.catalogoCache[id] = { manual: true, url, camada, camadas: Array.isArray(camadas) ? camadas.map(Number).filter(Number.isFinite) : undefined };
+    }
+    base.salvarCatalogo();
+    return enviarJson(res, await verificarCamada(id));
+  }
+  if (r === '/api/catalogo/verificar' && m === 'POST') {
+    const { ids } = await lerJson(req);
+    const alvo = ids?.length ? ids : CATALOGO.map((c) => c.id);
+    const out = {};
+    await Promise.all(alvo.map(async (id) => { out[id] = await verificarCamada(id); }));
+    return enviarJson(res, out);
+  }
+  if (r === '/api/catalogo/consultar' && m === 'POST') {
+    const { ids = [], ...ponto } = await lerJson(req);
+    const resultados = [];
+    await Promise.all(ids.map(async (id) => {
+      const c = camadaEfetiva(id);
+      if (!c || !['wms', 'arcgis'].includes(c.tipo)) return;
+      try {
+        const itens = await consultar(c, camadaResolvida(id), ponto);
+        if (itens.length) resultados.push({ id, nome: c.nome, fonte: c.fonte, itens });
+      } catch (e) { resultados.push({ id, nome: c.nome, fonte: c.fonte, erro: e.message }); }
+    }));
+    return enviarJson(res, resultados);
+  }
+  if (r === '/api/catalogo/legenda' && m === 'GET') {
+    const c = camadaEfetiva(q.id);
+    if (!c) return enviarJson(res, { erro: 'Camada desconhecida.' }, 404);
+    try { return enviarJson(res, await legenda(c, camadaResolvida(q.id))); }
+    catch (e) { return enviarJson(res, { erro: e.message }, 502); }
+  }
+
+  // CFEM (arrecadação) para a camada/filtro de minas ativas
+  if (r === '/api/cfem' && m === 'POST') {
+    const buf = await lerCorpo(req);
+    const { mapa, linhas } = lerCfem(buf, q.modo === 'mesclar' ? base.cfem : new Map());
+    return enviarJson(res, { ...base.importarCfem(mapa, q.arquivo || 'upload'), linhas });
+  }
+  if (r === '/api/cfem/baixar' && m === 'POST') return enviarJson(res, await baixarCfem());
 
   // Monitoramento de processos
   if (r === '/api/monitorados') {
@@ -300,12 +475,12 @@ async function api(req, res, url) {
 
   if (r === '/api/backup' && m === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename="filao-backup.json"' });
-    const { monitorados, regioes, alertas, historico, config } = base.estado;
-    return res.end(JSON.stringify({ versao: 1, monitorados, regioes, alertas, historico, config }));
+    const { monitorados, regioes, alertas, historico, config, grupos, filtros } = base.estado;
+    return res.end(JSON.stringify({ versao: 2, monitorados, regioes, alertas, historico, config, grupos, filtros }));
   }
   if (r === '/api/backup' && m === 'POST') {
     const d = await lerJson(req);
-    for (const k of ['monitorados', 'regioes', 'alertas', 'historico']) if (d[k]) base.estado[k] = d[k];
+    for (const k of ['monitorados', 'regioes', 'alertas', 'historico', 'grupos', 'filtros']) if (d[k]) base.estado[k] = d[k];
     if (d.config) Object.assign(base.estado.config, d.config);
     base.salvarEstado();
     return enviarJson(res, { ok: true });
@@ -334,8 +509,8 @@ export const servidor = http.createServer(async (req, res) => {
     if (req.method === 'GET' && servirEstatico(req, res, url.pathname)) return;
     res.writeHead(404); res.end('Não encontrado');
   } catch (e) {
-    console.error(e);
-    if (!res.headersSent) enviarJson(res, { erro: e.message }, 500);
+    if (!e.status) console.error(e);
+    if (!res.headersSent) enviarJson(res, { erro: e.message }, e.status || 500);
     else res.end();
   }
 });
