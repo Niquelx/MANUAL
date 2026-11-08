@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Filão · Inteligência Minerária</title>
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="/vendor/geoman/leaflet-geoman.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topo">
+  <div class="marca"><span class="logo">◆</span> Filão</div>
+  <nav class="abas" id="abas">
+    <button data-aba="busca" class="ativa">Busca</button>
+    <button data-aba="analise">Análise de área</button>
+    <button data-aba="monitorados">Monitorados</button>
+    <button data-aba="alertas">Alertas <span id="badge-alertas" class="badge" hidden></span></button>
+    <button data-aba="regioes">Regiões</button>
+    <button data-aba="camadas">Camadas</button>
+    <button data-aba="painel">Painel</button>
+    <button data-aba="dados">Dados</button>
+  </nav>
+</header>
+
+<main class="layout">
+  <aside class="lateral">
+    <!-- BUSCA -->
+    <section data-painel="busca" class="painel ativo">
+      <form id="form-busca" class="form">
+        <input name="q" placeholder="Busca livre: titular, substância, fase, evento…" autocomplete="off">
+        <div class="linha">
+          <input name="processo" placeholder="Nº processo (ex. 830.123/2020)">
+          <input name="titular" placeholder="Titular / CPF-CNPJ no nome">
+        </div>
+        <details>
+          <summary>Filtros avançados</summary>
+          <div class="linha">
+            <input name="substancia" placeholder="Substância" list="lista-subs">
+            <input name="evento" placeholder="Texto no último evento">
+          </div>
+          <div class="linha">
+            <select name="fase" id="sel-fase"><option value="">Todas as fases</option></select>
+            <select name="uf" id="sel-uf"><option value="">Todas as UFs</option></select>
+          </div>
+          <div class="linha">
+            <select name="uso" id="sel-uso"><option value="">Todos os usos</option></select>
+            <select name="ordem">
+              <option value="processo">Ordenar: processo</option>
+              <option value="area_ha">Área</option>
+              <option value="ano">Ano</option>
+              <option value="titular">Titular</option>
+              <option value="fase">Fase</option>
+            </select>
+            <select name="dir"><option value="asc">↑</option><option value="desc">↓</option></select>
+          </div>
+          <div class="linha">
+            <input name="ano_min" type="number" placeholder="Ano de">
+            <input name="ano_max" type="number" placeholder="Ano até">
+            <input name="area_min" type="number" step="any" placeholder="Área mín. (ha)">
+            <input name="area_max" type="number" step="any" placeholder="Área máx. (ha)">
+          </div>
+          <label class="check"><input type="checkbox" name="na_tela"> Somente na área visível do mapa</label>
+          <label class="check"><input type="checkbox" name="monitorados" value="1"> Somente monitorados</label>
+        </details>
+        <datalist id="lista-subs"></datalist>
+        <div class="linha acoes">
+          <button type="submit" class="primario">Buscar</button>
+          <button type="reset">Limpar</button>
+          <div class="menu-export">
+            <button type="button" id="btn-exportar">Exportar ▾</button>
+            <div class="menu" hidden>
+              <a data-fmt="csv">CSV (planilha)</a>
+              <a data-fmt="geojson">GeoJSON</a>
+              <a data-fmt="kml">KML (Google Earth)</a>
+            </div>
+          </div>
+        </div>
+      </form>
+      <div id="facetas" class="facetas"></div>
+      <div id="resultado-info" class="info"></div>
+      <ul id="resultados" class="lista"></ul>
+      <div id="paginacao" class="paginacao"></div>
+    </section>
+
+    <!-- ANÁLISE DE ÁREA -->
+    <section data-painel="analise" class="painel">
+      <p class="dica">Desenhe um polígono ou retângulo no mapa (ferramentas à esquerda do mapa), cole coordenadas ou importe um arquivo. O sistema calcula interferências com processos existentes e a área livre.</p>
+      <div class="linha acoes">
+        <button id="btn-desenhar" class="primario">Desenhar polígono</button>
+        <button id="btn-retangulo">Retângulo</button>
+        <label class="botao-arquivo">Importar KML/GeoJSON/SHP<input type="file" id="arq-analise" accept=".kml,.kmz,.geojson,.json,.zip" hidden></label>
+      </div>
+      <details>
+        <summary>Colar coordenadas (lat, lon por linha)</summary>
+        <textarea id="txt-coords" rows="5" placeholder="-20.40, -44.20&#10;-20.40, -44.15&#10;-20.35, -44.15&#10;-20.35, -44.20"></textarea>
+        <p class="dica">Aceita graus decimais ou GMS (ex.: 20°24'00"S 44°12'00"W).</p>
+        <button id="btn-coords">Usar coordenadas</button>
+      </details>
+      <div id="analise-res"></div>
+    </section>
+
+    <!-- MONITORADOS -->
+    <section data-painel="monitorados" class="painel">
+      <p class="dica">A cada importação/atualização da base, mudanças de fase, evento, titular, substância, uso ou área dos processos monitorados geram alertas.</p>
+      <div class="linha"><input id="filtro-mon" placeholder="Filtrar monitorados…"></div>
+      <ul id="lista-mon" class="lista"></ul>
+    </section>
+
+    <!-- ALERTAS -->
+    <section data-painel="alertas" class="painel">
+      <div class="linha acoes">
+        <button id="btn-ler-todos">Marcar todos como lidos</button>
+        <button id="btn-limpar-lidos">Excluir lidos</button>
+        <label class="check"><input type="checkbox" id="so-nao-lidos"> Só não lidos</label>
+      </div>
+      <div class="linha acoes"><button id="btn-notif">Ativar notificações do navegador</button></div>
+      <ul id="lista-alertas" class="lista"></ul>
+    </section>
+
+    <!-- REGIÕES -->
+    <section data-painel="regioes" class="painel">
+      <p class="dica">Regiões de interesse geram alerta quando surgir na base um processo novo que toque a região.</p>
+      <div class="linha acoes">
+        <input id="nome-regiao" placeholder="Nome da região">
+        <button id="btn-nova-regiao" class="primario">Desenhar região</button>
+      </div>
+      <ul id="lista-regioes" class="lista"></ul>
+    </section>
+
+    <!-- CAMADAS -->
+    <section data-painel="camadas" class="painel">
+      <h3>Mapa base</h3>
+      <div id="bases" class="lista-simples"></div>
+      <h3>Camadas</h3>
+      <label class="check"><input type="checkbox" id="cam-processos" checked> Processos minerários (cor por fase)</label>
+      <div id="legenda-fases" class="legenda"></div>
+      <div id="lista-camadas" class="lista-simples"></div>
+      <h3>Adicionar camada</h3>
+      <p class="dica">Ex.: geologia (CPRM/SGB), unidades de conservação, terras indígenas, CAR/SIGEF, ocorrências minerais. Formatos: Shapefile (.zip, em coordenadas geográficas), GeoJSON, KML, KMZ.</p>
+      <form id="form-camada" class="form">
+        <div class="linha">
+          <input name="nome" placeholder="Nome da camada" required>
+          <input name="grupo" placeholder="Grupo (ex. Ambiental)">
+          <input name="cor" type="color" value="#e8590c" title="Cor">
+        </div>
+        <input type="file" name="arquivo" accept=".zip,.geojson,.json,.kml,.kmz" required>
+        <button class="primario">Enviar camada</button>
+      </form>
+    </section>
+
+    <!-- PAINEL -->
+    <section data-painel="painel" class="painel">
+      <div id="painel-numeros" class="numeros"></div>
+      <h3>Por fase</h3><div id="graf-fase" class="barras"></div>
+      <h3>Principais substâncias</h3><div id="graf-subs" class="barras"></div>
+      <h3>Maiores titulares (nº de processos)</h3><div id="graf-tit" class="barras"></div>
+      <h3>Por UF</h3><div id="graf-uf" class="barras"></div>
+    </section>
+
+    <!-- DADOS -->
+    <section data-painel="dados" class="painel">
+      <h3>Base local</h3>
+      <div id="ufs-carregadas" class="lista-simples"></div>
+      <h3>Baixar base oficial ANM (SIGMINE)</h3>
+      <div class="linha acoes">
+        <select id="uf-anm"></select>
+        <button id="btn-anm" class="primario">Baixar e importar</button>
+      </div>
+      <h3>Importar arquivo de processos</h3>
+      <p class="dica">Shapefile do SIGMINE (.zip), GeoJSON ou KML com o atributo PROCESSO (ou NUMERO e ANO).</p>
+      <form id="form-importar" class="form">
+        <input type="file" name="arquivo" accept=".zip,.geojson,.json,.kml,.kmz" required>
+        <div class="linha">
+          <input name="uf" placeholder="UF (se o arquivo não tiver)" maxlength="2">
+          <select name="modo"><option value="substituir">Substituir a UF</option><option value="mesclar">Mesclar</option></select>
+        </div>
+        <button class="primario">Importar</button>
+      </form>
+      <h3>Configurações</h3>
+      <form id="form-config" class="form">
+        <label>URL da base ANM ({UF} = sigla)<input name="urlAnm"></label>
+        <label>Link de consulta externa do processo ({NUMERO}, {ANO}, {PROCESSO})<input name="urlConsulta" placeholder="Opcional"></label>
+        <div class="linha">
+          <label>Atualizar a cada (horas, 0 = desligado)<input name="atualizacaoAutomaticaHoras" type="number" min="0"></label>
+          <label>UFs automáticas (ex. MG,GO)<input name="ufsAutomaticas"></label>
+        </div>
+        <button class="primario">Salvar</button>
+      </form>
+      <h3>Backup</h3>
+      <div class="linha acoes">
+        <a class="botao" href="/api/backup">Baixar backup</a>
+        <label class="botao-arquivo">Restaurar backup<input type="file" id="arq-backup" accept=".json" hidden></label>
+      </div>
+      <h3>Histórico de importações</h3>
+      <ul id="lista-importacoes" class="lista"></ul>
+    </section>
+  </aside>
+
+  <div class="mapa-wrap">
+    <div id="mapa"></div>
+    <div id="mapa-aviso" class="mapa-aviso" hidden></div>
+    <div id="coords" class="coords"></div>
+  </div>
+</main>
+
+<div id="detalhe" class="detalhe" hidden>
+  <button class="fechar" id="fechar-detalhe">×</button>
+  <div id="detalhe-corpo"></div>
+</div>
+<div id="toast" class="toast" hidden></div>
+
+<script src="/vendor/leaflet/leaflet.js"></script>
+<script src="/vendor/geoman/leaflet-geoman.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

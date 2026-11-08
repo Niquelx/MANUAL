@@ -1,0 +1,24 @@
+{
+  "name": "filao",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Plataforma pessoal de inteligência minerária: mapa, processos ANM (SIGMINE), monitoramento, alertas e análise de interferência.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "importar": "node scripts/importar.js",
+    "exemplo": "node scripts/gerar-exemplo.js",
+    "test": "node scripts/teste.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@geoman-io/leaflet-geoman-free": "2.20.6",
+    "@tmcw/togeojson": "7.1.3",
+    "@turf/turf": "7.4.0",
+    "@xmldom/xmldom": "0.9.12",
+    "adm-zip": "0.6.1",
+    "leaflet": "1.9.4",
+    "shapefile": "0.6.6"
+  }
+}
